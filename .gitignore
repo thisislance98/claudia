@@ -47,3 +47,9 @@ script.js
 # Local config
 .env
 .env.local
+
+# Runtime data (persisted state)
+backend/tasks.json
+backend/config.json
+backend/workspace-config.json
+backend/chat-history.json

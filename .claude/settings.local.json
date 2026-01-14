@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/I850333/projects/experiments/codeui/backend/hooks/stop-notify.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/I850333/projects/experiments/codeui/backend/hooks/notification-hook.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/I850333/projects/experiments/codeui/backend/hooks/notification-hook.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

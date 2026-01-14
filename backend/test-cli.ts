@@ -37,6 +37,7 @@ interface TestConfig {
     viewTaskFiles: boolean;   // View code files for a task
     getConfig: boolean;       // Get orchestrator config
     imagePath: string | null; // Path to image to attach
+    supervisorChat: boolean;  // Use supervisor chat (supervisor:chat:message)
 }
 
 class TestCLI {
@@ -144,6 +145,9 @@ class TestCLI {
                 } else if (this.config.createTask) {
                     // Create task directly like the frontend does
                     this.sendTask(this.config.taskName, this.config.testMessage);
+                } else if (this.config.supervisorChat) {
+                    // Use supervisor chat
+                    this.sendSupervisorChat(this.config.testMessage, this.config.taskId || undefined);
                 } else {
                     this.sendMessage(this.config.testMessage, this.config.imagePath || undefined);
                 }
@@ -254,6 +258,24 @@ class TestCLI {
 
 
         console.log('🗑️  Clearing chat...');
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendSupervisorChat(content: string, taskId?: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot send supervisor chat: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'supervisor:chat:message',
+            payload: { content, taskId }
+        };
+
+        console.log(`📤 Sending supervisor chat: "${content}"`);
+        if (taskId) {
+            console.log(`   Task context: ${taskId}`);
+        }
         this.ws.send(JSON.stringify(message));
     }
 
@@ -576,6 +598,14 @@ class TestCLI {
                 this.handleTaskOutput(message.payload as { taskId: string; data: string });
                 break;
 
+            case 'supervisor:chat:response':
+                this.handleSupervisorChatResponse(message.payload as { message: ChatMessage });
+                break;
+
+            case 'supervisor:chat:typing':
+                this.handleSupervisorTyping(message.payload as { isTyping: boolean });
+                break;
+
             case 'plan:created':
             case 'plan:approved':
             case 'plan:rejected':
@@ -624,6 +654,33 @@ class TestCLI {
         const previousCount = this.chatMessages.length;
         this.chatMessages = [];
         console.log(`[${elapsed}s] CLEARED   │ Removed ${previousCount} messages from local state`);
+    }
+
+    private handleSupervisorChatResponse(payload: { message: ChatMessage }): void {
+        const msg = payload.message;
+        this.chatMessages.push(msg);
+
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        const role = msg.role.toUpperCase().padEnd(9);
+
+        console.log(`[${elapsed}s] ${role} │ ${msg.content}`);
+
+        // Update activity time
+        this.lastActivityTime = Date.now();
+
+        // Check for completion after assistant message
+        if (msg.role === 'assistant') {
+            this.scheduleCompletionCheck();
+        }
+    }
+
+    private handleSupervisorTyping(payload: { isTyping: boolean }): void {
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        if (payload.isTyping) {
+            console.log(`[${elapsed}s] TYPING    │ Supervisor is typing...`);
+        } else {
+            console.log(`[${elapsed}s] TYPING    │ Supervisor finished typing`);
+        }
     }
 
     private handleChatMessage(payload: { message: ChatMessage }): void {
@@ -810,6 +867,7 @@ function parseArgs(): TestConfig {
     let viewTaskFiles = false;
     let getConfig = false;
     let imagePath: string | null = null;
+    let supervisorChat = false;
 
     for (let i = 0; i < args.length; i++) {
         switch (args[i]) {
@@ -898,6 +956,10 @@ function parseArgs(): TestConfig {
             case '--image':
             case '-i':
                 imagePath = args[++i];
+                break;
+            case '--supervisor-chat':
+            case '-s':
+                supervisorChat = true;
                 break;
             case '--help':
             case '-h':
@@ -1024,7 +1086,8 @@ Examples:
         listTasks,
         viewTaskFiles,
         getConfig,
-        imagePath
+        imagePath,
+        supervisorChat
     };
 }
 

@@ -1,39 +1,32 @@
 import { useState, useRef, useEffect } from 'react';
 import { WorkspacePanel } from './components/WorkspacePanel';
-import { ChatPanel } from './components/ChatPanel';
-import { TerminalPanel } from './components/TerminalPanel';
-import { ConversationPicker } from './components/ConversationPicker';
+import { TerminalView } from './components/TerminalView';
+import { SupervisorChat } from './components/SupervisorChat';
 import { ProjectPicker } from './components/ProjectPicker';
-import { ConfigPanel } from './components/ConfigPanel';
-import { VoiceSettings } from './components/VoiceSettings';
-import { NotificationProvider } from './components/NotificationContainer';
+import { SettingsMenu } from './components/SettingsMenu';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Sparkles, Settings, ToggleLeft, ToggleRight, ClipboardList, Zap, Mic } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X } from 'lucide-react';
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
-const DEFAULT_SIDEBAR_WIDTH = 300;
+const DEFAULT_SIDEBAR_WIDTH = 640;
+const CHAT_PANEL_WIDTH_KEY = 'claudia-chat-panel-width';
+const DEFAULT_CHAT_PANEL_WIDTH = 380;
 
 function App() {
     const {
-        sendChatMessage,
-        selectConversation,
-        sendDeleteTask,
-        sendClearTasks,
-        sendClearChat,
-        approvePlan,
-        rejectPlan,
-        sendAutoApproveUpdate,
+        createTask,
+        destroyTask,
         createWorkspace,
         deleteWorkspace,
-        setActiveWorkspace,
-        sendTaskInput,
-        sendStopTask,
-        createTask
+        sendChatMessage,
+        clearChatHistory,
+        wsRef
     } = useWebSocket();
-    const { selectedTaskId, autoApproveEnabled, toggleAutoApprove, setShowProjectPicker, voiceEnabled } = useTaskStore();
-    const [configOpen, setConfigOpen] = useState(false);
-    const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
+
+    const { selectedTaskId, tasks, setShowProjectPicker, chatMessages, chatTyping } = useTaskStore();
+    const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
+
     const [sidebarWidth, setSidebarWidth] = useState(() => {
         try {
             const savedWidth = localStorage.getItem(SIDEBAR_WIDTH_KEY);
@@ -42,31 +35,54 @@ function App() {
             return DEFAULT_SIDEBAR_WIDTH;
         }
     });
+    const [chatPanelWidth, setChatPanelWidth] = useState(() => {
+        try {
+            const savedWidth = localStorage.getItem(CHAT_PANEL_WIDTH_KEY);
+            return savedWidth ? parseInt(savedWidth, 10) : DEFAULT_CHAT_PANEL_WIDTH;
+        } catch {
+            return DEFAULT_CHAT_PANEL_WIDTH;
+        }
+    });
     const [isResizing, setIsResizing] = useState(false);
+    const [isResizingChat, setIsResizingChat] = useState(false);
+    const [showSettings, setShowSettings] = useState(false);
+    const [showChatPanel, setShowChatPanel] = useState(false);
     const sidebarRef = useRef<HTMLElement>(null);
 
     const handleMouseDown = () => {
         setIsResizing(true);
     };
 
+    const handleChatResizeMouseDown = () => {
+        setIsResizingChat(true);
+    };
+
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
-            if (!isResizing) return;
-
-            const newWidth = e.clientX;
-            const minWidth = 200;
-            const maxWidth = 600;
-
-            if (newWidth >= minWidth && newWidth <= maxWidth) {
-                setSidebarWidth(newWidth);
+            if (isResizing) {
+                const newWidth = e.clientX;
+                const minWidth = 250;
+                const maxWidth = 800;
+                if (newWidth >= minWidth && newWidth <= maxWidth) {
+                    setSidebarWidth(newWidth);
+                }
+            }
+            if (isResizingChat) {
+                const newWidth = window.innerWidth - e.clientX;
+                const minWidth = 300;
+                const maxWidth = 600;
+                if (newWidth >= minWidth && newWidth <= maxWidth) {
+                    setChatPanelWidth(newWidth);
+                }
             }
         };
 
         const handleMouseUp = () => {
             setIsResizing(false);
+            setIsResizingChat(false);
         };
 
-        if (isResizing) {
+        if (isResizing || isResizingChat) {
             document.addEventListener('mousemove', handleMouseMove);
             document.addEventListener('mouseup', handleMouseUp);
         }
@@ -75,108 +91,139 @@ function App() {
             document.removeEventListener('mousemove', handleMouseMove);
             document.removeEventListener('mouseup', handleMouseUp);
         };
-    }, [isResizing]);
+    }, [isResizing, isResizingChat]);
 
     useEffect(() => {
         try {
             localStorage.setItem(SIDEBAR_WIDTH_KEY, sidebarWidth.toString());
         } catch {
-            // Silently fail if localStorage is not available
+            // Silently fail
         }
     }, [sidebarWidth]);
 
-    // Handle project selection - creates a workspace from the folder path
+    useEffect(() => {
+        try {
+            localStorage.setItem(CHAT_PANEL_WIDTH_KEY, chatPanelWidth.toString());
+        } catch {
+            // Silently fail
+        }
+    }, [chatPanelWidth]);
+
     const handleProjectSelect = (path: string) => {
         createWorkspace(path);
         setShowProjectPicker(false);
     };
 
+    const handleSelectTask = (taskId: string) => {
+        // Only update local state - TerminalView will send task:select when it mounts
+        useTaskStore.getState().selectTask(taskId);
+
+        // Dispatch scroll-to-bottom event for the task's terminal
+        // Use setTimeout to ensure the terminal has time to mount/update
+        setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
+                detail: { taskId }
+            }));
+        }, 100);
+    };
+
+    // Count unread messages indicator
+    const hasUnreadMessages = chatMessages.length > 0 && !showChatPanel;
+
     return (
-        <NotificationProvider>
-            <div className="app">
-                <header className="app-header">
-                    <div className="logo">
-                        <Sparkles size={24} />
-                        <h1>Claudia</h1>
-                    </div>
-                    <div className="header-controls">
-                        <div
-                            className={`mode-toggle ${!autoApproveEnabled ? 'plan-mode' : 'normal-mode'}`}
-                            onClick={() => {
-                                toggleAutoApprove();
-                                sendAutoApproveUpdate(!autoApproveEnabled);
-                            }}
-                            title={!autoApproveEnabled ? 'Plan Mode: Review before execution' : 'Normal Mode: Execute immediately'}
-                        >
-                            {!autoApproveEnabled ? <ClipboardList size={16} /> : <Zap size={16} />}
-                            <span>{!autoApproveEnabled ? 'Plan Mode' : 'Normal Mode'}</span>
-                            {!autoApproveEnabled ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
-                        </div>
-                        <button
-                            className={`voice-settings-button ${voiceEnabled ? 'active' : ''}`}
-                            onClick={() => setVoiceSettingsOpen(true)}
-                            title="Voice Settings"
-                        >
-                            <Mic size={20} />
-                        </button>
-                        <button
-                            className="settings-button"
-                            onClick={() => setConfigOpen(true)}
-                            title="Orchestrator Settings"
-                        >
-                            <Settings size={20} />
-                        </button>
-                    </div>
-                </header>
+        <div className="app">
+            <header className="app-header">
+                <div className="logo">
+                    <Terminal size={24} />
+                    <h1>Claudia</h1>
+                </div>
+                <div className="header-controls">
+                    <button
+                        className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
+                        onClick={() => setShowChatPanel(!showChatPanel)}
+                        title={showChatPanel ? 'Close Chat' : 'Open Chat'}
+                    >
+                        <MessageCircle size={18} />
+                        <span>Chat</span>
+                        {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
+                    </button>
+                    <button
+                        className="settings-button"
+                        onClick={() => setShowSettings(true)}
+                        title="Settings"
+                    >
+                        <Settings size={20} />
+                    </button>
+                </div>
+            </header>
 
-                <main className="app-main">
-                    <aside className="sidebar" ref={sidebarRef} style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}>
-                        <WorkspacePanel
-                            onDeleteTask={sendDeleteTask}
-                            onClearTasks={sendClearTasks}
-                            onCreateWorkspace={createWorkspace}
-                            onDeleteWorkspace={deleteWorkspace}
-                            onStopTask={sendStopTask}
-                            onCreateTask={createTask}
-                        />
-                    </aside>
-
-                    <div
-                        className={`resize-handle ${isResizing ? 'resizing' : ''}`}
-                        onMouseDown={handleMouseDown}
+            <main className="app-main">
+                <aside
+                    className="sidebar"
+                    ref={sidebarRef}
+                    style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}
+                >
+                    <WorkspacePanel
+                        onDeleteTask={destroyTask}
+                        onCreateWorkspace={createWorkspace}
+                        onDeleteWorkspace={deleteWorkspace}
+                        onCreateTask={createTask}
+                        onSelectTask={handleSelectTask}
                     />
+                </aside>
 
-                    <section className="main-panel">
-                        {selectedTaskId ? (
-                            <TerminalPanel
-                                onSendInput={sendTaskInput}
-                                onStopTask={sendStopTask}
-                            />
-                        ) : (
-                            <ChatPanel
+                <div
+                    className={`resize-handle ${isResizing ? 'resizing' : ''}`}
+                    onMouseDown={handleMouseDown}
+                />
+
+                <section className="main-panel">
+                    {selectedTask ? (
+                        <TerminalView key={selectedTask.id} task={selectedTask} wsRef={wsRef} />
+                    ) : (
+                        <div className="empty-state-main">
+                            <Terminal size={48} strokeWidth={1} />
+                            <h2>Select a task to view its terminal</h2>
+                            <p>Add a workspace and create a task to get started</p>
+                        </div>
+                    )}
+                </section>
+
+                {showChatPanel && (
+                    <>
+                        <div
+                            className={`resize-handle chat-resize ${isResizingChat ? 'resizing' : ''}`}
+                            onMouseDown={handleChatResizeMouseDown}
+                        />
+                        <aside
+                            className="chat-panel-sidebar"
+                            style={{ width: `${chatPanelWidth}px`, minWidth: `${chatPanelWidth}px` }}
+                        >
+                            <div className="chat-panel-header">
+                                <span>AI Supervisor</span>
+                                <button
+                                    className="chat-close-button"
+                                    onClick={() => setShowChatPanel(false)}
+                                    title="Close chat"
+                                >
+                                    <X size={18} />
+                                </button>
+                            </div>
+                            <SupervisorChat
+                                messages={chatMessages}
+                                isTyping={chatTyping}
+                                selectedTaskId={selectedTaskId}
                                 onSendMessage={sendChatMessage}
-                                onClearChat={sendClearChat}
-                                onApprovePlan={approvePlan}
-                                onRejectPlan={rejectPlan}
-                                onSetActiveWorkspace={setActiveWorkspace}
+                                onClearHistory={clearChatHistory}
                             />
-                        )}
-                    </section>
-                </main>
+                        </aside>
+                    </>
+                )}
+            </main>
 
-                {/* Conversation selection modal */}
-                <ConversationPicker onSelect={selectConversation} />
-
-                {/* Project picker modal - used for adding workspaces */}
-                <ProjectPicker onSelect={handleProjectSelect} />
-
-                {/* Config panel modal */}
-                <ConfigPanel isOpen={configOpen} onClose={() => setConfigOpen(false)} />
-
-                {/* Voice settings modal */}
-                {voiceSettingsOpen && <VoiceSettings onClose={() => setVoiceSettingsOpen(false)} />}
-            </div>
-        </NotificationProvider>
+            <ProjectPicker onSelect={handleProjectSelect} />
+            <SettingsMenu isOpen={showSettings} onClose={() => setShowSettings(false)} />
+        </div>
     );
 }
 

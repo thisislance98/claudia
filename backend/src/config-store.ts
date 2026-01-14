@@ -1,5 +1,5 @@
 /**
- * Config Store - Manages orchestrator configuration including system prompts, tools, and MCP servers
+ * Config Store - Manages application configuration (MCP servers)
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -7,18 +7,6 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-export interface SystemPrompts {
-
-    taskCompletion: string;
-    logAnalysis: string;
-}
-
-export interface ToolDefinition {
-    name: string;
-    description: string;
-    inputSchema?: Record<string, unknown>;
-}
 
 export interface MCPServerConfig {
     name: string;
@@ -28,96 +16,46 @@ export interface MCPServerConfig {
     enabled: boolean;
 }
 
-export interface SAPAICoreConfig {
-    providerID: string;
-    modelID: string;
-    authUrl?: string;
-    clientId?: string;
-    clientSecret?: string;
-    resourceGroup?: string;
-    baseUrl?: string;
-}
-
-export interface ClaudeConfig {
-    cliPath?: string;
-    model?: string;
-    apiKey?: string;
-    maxTokens?: number;
-}
-
-export interface OrchestratorConfig {
-    systemPrompts: SystemPrompts;
-    tools: ToolDefinition[];
+export interface AppConfig {
     mcpServers: MCPServerConfig[];
-    sapAICore?: SAPAICoreConfig;
-    claude?: ClaudeConfig;
-    aiBackend: 'claude' | 'claude';
+    skipPermissions: boolean;
+    rules: string;
+    supervisorEnabled: boolean;
+    supervisorSystemPrompt: string;
+    autoFocusOnInput: boolean;  // Auto-switch to task when it needs input
 }
 
-// Default system prompts (matching llm-service.ts)
-const DEFAULT_PROMPTS: SystemPrompts = {
+const DEFAULT_SUPERVISOR_PROMPT = `You are an AI supervisor monitoring coding tasks. Your job is to:
+1. Ensure tasks complete without errors
+2. Verify tasks are properly tested when appropriate
+3. Identify if follow-up actions are needed
 
-    taskCompletion: `You are an AI orchestrator analyzing task completion results.
-Analyze the following task output and determine:
-1. Was the task truly successful? (even if exit code is 0, check for errors in output)
-2. Does this need further action or debugging?
-3. What should you tell the user?
+When a task completes, analyze the conversation and determine if:
+- The task was completed successfully
+- Tests were run (if applicable)
+- There are any errors or issues that need attention
+- Follow-up actions are recommended
 
-Respond with a JSON object containing:
-- "message": A brief, natural message (1-2 sentences) summarizing what happened. Use emoji if appropriate.
-- "needsContinuation": boolean - true if errors need fixing, tests failed, or something isn't working
-- "suggestedAction": optional string - if continuation needed, what should be done next
+If everything looks good, just confirm the task is complete. If issues exist, suggest specific next steps.`;
 
-Be concise and helpful. Examples of good messages:
-- "✅ Todo app created successfully! It's ready to use with local storage and a modern UI."
-- "❌ Build failed due to a TypeScript error in AuthService. Let me fix that for you."
-- "⚠️ Tests passed but there's a deprecation warning we should address."
-
-IMPORTANT: Output ONLY valid JSON, nothing else.`,
-
-    logAnalysis: `You are an AI assistant analyzing logs from a running Claude Code task.
-Your job is to detect issues that need intervention and suggest what instruction to send.
-
-Analyze the output and determine:
-1. Is there a real issue that needs intervention? (Not just normal progress/verbose output)
-2. What type of issue is it?
-3. What instruction should be sent to the Claude Code instance to fix it?
-
-Respond with JSON only:
-{
-  "hasIssue": boolean,
-  "issueType": "error" | "stuck" | "permission" | "dependency" | "other" (if hasIssue),
-  "issueDescription": "brief description" (if hasIssue),
-  "suggestedIntervention": "the exact instruction to send to Claude Code" (if hasIssue)
-}
-
-Examples of good interventions:
-- "Try a different approach - use XYZ instead"
-- "The error is caused by ABC, fix it by doing DEF"
-- "Skip this step and move on to the next part of the task"
-- "Install the missing dependency first: npm install xyz"
-
-IMPORTANT: Only set hasIssue to true for REAL problems that block progress, not just warnings or verbose output.`
-};
-
-const DEFAULT_CONFIG: OrchestratorConfig = {
-    systemPrompts: DEFAULT_PROMPTS,
-    tools: [],
+const DEFAULT_CONFIG: AppConfig = {
     mcpServers: [],
-    aiBackend: 'claude'
+    skipPermissions: false,
+    rules: '',
+    supervisorEnabled: false,
+    supervisorSystemPrompt: DEFAULT_SUPERVISOR_PROMPT,
+    autoFocusOnInput: false
 };
 
 export class ConfigStore {
-    private config: OrchestratorConfig;
+    private config: AppConfig;
     private configFile: string;
 
     constructor(basePath?: string) {
-        // Use basePath if provided (Electron userData), otherwise use default location
         this.configFile = basePath
-            ? join(basePath, 'orchestrator-config.json')
-            : join(__dirname, '..', 'orchestrator-config.json');
+            ? join(basePath, 'config.json')
+            : join(__dirname, '..', 'config.json');
 
-        // Ensure directory exists
         if (basePath && !existsSync(basePath)) {
             mkdirSync(basePath, { recursive: true });
         }
@@ -125,17 +63,18 @@ export class ConfigStore {
         this.config = this.loadConfig();
     }
 
-    private loadConfig(): OrchestratorConfig {
+    private loadConfig(): AppConfig {
         try {
             if (existsSync(this.configFile)) {
                 const data = readFileSync(this.configFile, 'utf-8');
-                const loaded = JSON.parse(data) as Partial<OrchestratorConfig>;
-                // Merge with defaults to ensure all fields exist
+                const loaded = JSON.parse(data) as Partial<AppConfig>;
                 return {
-                    systemPrompts: { ...DEFAULT_PROMPTS, ...loaded.systemPrompts },
-                    tools: loaded.tools || [],
                     mcpServers: loaded.mcpServers || [],
-                    aiBackend: loaded.aiBackend || 'claude'
+                    skipPermissions: loaded.skipPermissions ?? false,
+                    rules: loaded.rules ?? '',
+                    supervisorEnabled: loaded.supervisorEnabled ?? false,
+                    supervisorSystemPrompt: loaded.supervisorSystemPrompt ?? DEFAULT_SUPERVISOR_PROMPT,
+                    autoFocusOnInput: loaded.autoFocusOnInput ?? false
                 };
             }
         } catch (error) {
@@ -154,52 +93,64 @@ export class ConfigStore {
         }
     }
 
-    getConfig(): OrchestratorConfig {
+    getConfig(): AppConfig {
         return { ...this.config };
     }
 
-    updateConfig(updates: Partial<OrchestratorConfig>): OrchestratorConfig {
-        if (updates.systemPrompts) {
-            this.config.systemPrompts = { ...this.config.systemPrompts, ...updates.systemPrompts };
-        }
-        if (updates.tools !== undefined) {
-            this.config.tools = updates.tools;
-        }
+    updateConfig(updates: Partial<AppConfig>): AppConfig {
         if (updates.mcpServers !== undefined) {
             this.config.mcpServers = updates.mcpServers;
         }
-        if (updates.aiBackend !== undefined) {
-            this.config.aiBackend = updates.aiBackend;
+        if (updates.skipPermissions !== undefined) {
+            this.config.skipPermissions = updates.skipPermissions;
         }
-        if (updates.sapAICore !== undefined) {
-            this.config.sapAICore = updates.sapAICore;
+        if (updates.rules !== undefined) {
+            this.config.rules = updates.rules;
         }
-        if (updates.claude !== undefined) {
-            this.config.claude = updates.claude;
+        if (updates.supervisorEnabled !== undefined) {
+            this.config.supervisorEnabled = updates.supervisorEnabled;
+        }
+        if (updates.supervisorSystemPrompt !== undefined) {
+            this.config.supervisorSystemPrompt = updates.supervisorSystemPrompt;
+        }
+        if (updates.autoFocusOnInput !== undefined) {
+            this.config.autoFocusOnInput = updates.autoFocusOnInput;
         }
         this.saveConfig();
         return this.getConfig();
     }
 
-    getSystemPrompts(): SystemPrompts {
-        return { ...this.config.systemPrompts };
+    isSupervisorEnabled(): boolean {
+        return this.config.supervisorEnabled;
     }
 
-    updateSystemPrompts(prompts: Partial<SystemPrompts>): SystemPrompts {
-        this.config.systemPrompts = { ...this.config.systemPrompts, ...prompts };
+    getSupervisorSystemPrompt(): string {
+        return this.config.supervisorSystemPrompt;
+    }
+
+    setSupervisorSystemPrompt(prompt: string): void {
+        this.config.supervisorSystemPrompt = prompt;
         this.saveConfig();
-        return this.getSystemPrompts();
     }
 
-    getTools(): ToolDefinition[] {
-        return [...this.config.tools];
+    getSkipPermissions(): boolean {
+        return this.config.skipPermissions;
+    }
+
+    getRules(): string {
+        return this.config.rules;
+    }
+
+    setRules(rules: string): void {
+        this.config.rules = rules;
+        this.saveConfig();
     }
 
     getMCPServers(): MCPServerConfig[] {
         return [...this.config.mcpServers];
     }
 
-    resetToDefaults(): OrchestratorConfig {
+    resetToDefaults(): AppConfig {
         this.config = { ...DEFAULT_CONFIG };
         this.saveConfig();
         return this.getConfig();

@@ -1,0 +1,122 @@
+.terminal-view {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: #0a0a0a;
+}
+
+.terminal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 16px;
+    background: #1a1a1a;
+    border-bottom: 1px solid #333;
+}
+
+.terminal-title {
+    font-size: 14px;
+    color: #d4d4d4;
+    font-family: "SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace;
+    flex: 1;
+}
+
+.copy-button {
+    background: transparent;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    padding: 4px 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    margin-right: 8px;
+}
+
+.copy-button:hover {
+    color: #fff;
+    background: #333;
+}
+
+.copy-button.copied {
+    color: #4ade80;
+}
+
+.terminal-state {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+}
+
+.terminal-state.busy {
+    background: #e5a00d;
+    color: #000;
+}
+
+.terminal-state.waiting_input {
+    background: #2472c8;
+    color: #fff;
+}
+
+.terminal-state.idle {
+    background: #0dbc79;
+    color: #000;
+}
+
+.history-button {
+    background: transparent;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #888;
+    cursor: pointer;
+    padding: 4px 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 8px;
+    transition: all 0.2s;
+}
+
+.history-button:hover {
+    background: #333;
+    color: #fff;
+    border-color: #555;
+}
+
+.history-button.active {
+    background: #2472c8;
+    color: #fff;
+    border-color: #2472c8;
+}
+
+.terminal-content {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+.terminal-content .terminal-container {
+    flex: 1;
+    min-width: 0;
+}
+
+.terminal-content .conversation-history {
+    width: 400px;
+    min-width: 300px;
+    max-width: 50%;
+}
+
+.terminal-container {
+    flex: 1;
+    padding: 8px;
+}
+
+.terminal-container .xterm {
+    height: 100%;
+}
+
+.terminal-container .xterm-viewport {
+    background: transparent !important;
+}

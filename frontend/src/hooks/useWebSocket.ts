@@ -1,14 +1,18 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
-import { WSMessage, Task, ChatMessage, ConversationSummary, Plan, ImageAttachment, Workspace, WorkspaceProject } from '@claudia/shared';
-import { getWebSocketUrl } from '../config/api-config';
+import { WSMessage, Task, Workspace, TaskState, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
+import { getWebSocketUrl, getApiBaseUrl } from '../config/api-config';
 
 const WS_URL = getWebSocketUrl();
+const API_URL = getApiBaseUrl();
+
+// Poll interval for task status (ms) - fallback for when hooks don't fire
+const STATUS_POLL_INTERVAL = 5000;
 
 export function useWebSocket() {
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimeoutRef = useRef<number>();
-    const originalMessageRef = useRef<string | null>(null);
+    const pollIntervalRef = useRef<number>();
 
     const {
         setConnected,
@@ -16,25 +20,19 @@ export function useWebSocket() {
         addTask,
         updateTask,
         deleteTask,
-        clearTasks,
-        appendOutput,
-        addChatMessage,
-        clearChatMessages,
-        showConversationSelection,
-        setThinking,
-        setPlan,
-        updatePlanStatus,
-        setCurrentProject,
+        selectTask,
         setWorkspaces,
         addWorkspace,
         removeWorkspace,
-        addProjectToWorkspaceState,
-        removeProjectFromWorkspaceState,
-        setActiveWorkspaceId
+        setTaskSummary,
+        addChatMessage,
+        setChatMessages,
+        setChatTyping,
+        setWaitingInput,
+        clearWaitingInput
     } = useTaskStore();
 
     const connect = useCallback(() => {
-        // Check for both OPEN and CONNECTING states to prevent duplicate connections in StrictMode
         if (wsRef.current?.readyState === WebSocket.OPEN ||
             wsRef.current?.readyState === WebSocket.CONNECTING) return;
 
@@ -49,7 +47,6 @@ export function useWebSocket() {
         ws.onclose = () => {
             console.log('[WebSocket] Disconnected');
             setConnected(false);
-            // Reconnect after 2 seconds
             reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
         };
 
@@ -65,97 +62,43 @@ export function useWebSocket() {
                 switch (message.type) {
                     case 'init': {
                         const payload = message.payload as {
-                            tasks: Task[],
-                            currentProject?: string | null,
-                            workspaces?: Workspace[],
-                            activeWorkspaceId?: string | null
+                            tasks: Task[];
+                            workspaces: Workspace[];
                         };
                         setTasks(payload.tasks);
-                        if (payload.currentProject !== undefined) {
-                            setCurrentProject(payload.currentProject);
-                        }
                         if (payload.workspaces) {
                             setWorkspaces(payload.workspaces);
                         }
-                        if (payload.activeWorkspaceId !== undefined) {
-                            setActiveWorkspaceId(payload.activeWorkspaceId);
-                        }
+                        // Fetch config to get autoFocusOnInput setting
+                        fetch(`${API_URL}/api/config`)
+                            .then(res => res.json())
+                            .then(config => {
+                                if (config.autoFocusOnInput !== undefined) {
+                                    useTaskStore.getState().setAutoFocusOnInput(config.autoFocusOnInput);
+                                }
+                            })
+                            .catch(err => console.error('Failed to fetch config:', err));
                         break;
                     }
                     case 'task:created': {
                         const payload = message.payload as { task: Task };
                         addTask(payload.task);
+                        // Auto-select newly created task
+                        selectTask(payload.task.id);
                         break;
                     }
-                    case 'task:updated':
-                    case 'task:complete': {
-                        const payload = message.payload as { task: Task };
-                        updateTask(payload.task);
-                        break;
-                    }
-                    case 'task:output': {
-                        const payload = message.payload as { taskId: string; data: string };
-                        appendOutput(payload.taskId, payload.data);
-                        break;
-                    }
-                    case 'chat:message': {
-                        const payload = message.payload as { message: ChatMessage };
-                        addChatMessage(payload.message);
-                        // Stop thinking when we get a response from assistant
-                        if (payload.message.role === 'assistant') {
-                            setThinking(false);
+                    case 'tasks:updated': {
+                        const payload = message.payload as { tasks?: Task[] };
+                        if (payload.tasks) {
+                            setTasks(payload.tasks);
                         }
                         break;
                     }
-                    case 'conversation:select': {
-                        const payload = message.payload as {
-                            candidates: ConversationSummary[];
-                            originalMessage: string
-                        };
-                        originalMessageRef.current = payload.originalMessage;
-                        showConversationSelection(payload.candidates, payload.originalMessage);
-                        break;
-                    }
-                    case 'task:deleted': {
+                    case 'task:destroyed': {
                         const payload = message.payload as { taskId: string };
                         deleteTask(payload.taskId);
                         break;
                     }
-                    case 'task:cleared': {
-                        clearTasks();
-                        break;
-                    }
-                    case 'chat:cleared': {
-                        clearChatMessages();
-                        break;
-                    }
-                    case 'plan:created': {
-                        const payload = message.payload as { plan: Plan };
-                        setPlan(payload.plan);
-                        setThinking(false);
-                        break;
-                    }
-                    case 'plan:approved': {
-                        updatePlanStatus('executing');
-                        // Clear plan after a short delay to show executing state
-                        setTimeout(() => setPlan(null), 1000);
-                        break;
-                    }
-                    case 'plan:rejected': {
-                        setPlan(null);
-                        break;
-                    }
-                    case 'project:changed': {
-                        const payload = message.payload as { currentProject: string | null };
-                        setCurrentProject(payload.currentProject);
-                        break;
-                    }
-                    case 'project:error': {
-                        const payload = message.payload as { error: string };
-                        alert(`Project error: ${payload.error}`);
-                        break;
-                    }
-                    // Workspace events
                     case 'workspace:created': {
                         const payload = message.payload as { workspace: Workspace };
                         addWorkspace(payload.workspace);
@@ -166,19 +109,70 @@ export function useWebSocket() {
                         removeWorkspace(payload.workspaceId);
                         break;
                     }
-                    case 'workspace:projectAdded': {
-                        const payload = message.payload as { workspaceId: string; project: WorkspaceProject };
-                        addProjectToWorkspaceState(payload.workspaceId, payload.project);
+                    case 'task:summary': {
+                        const payload = message.payload as { summary: TaskSummary };
+                        console.log('[WebSocket] Task summary received:', payload.summary);
+                        setTaskSummary(payload.summary);
                         break;
                     }
-                    case 'workspace:projectRemoved': {
-                        const payload = message.payload as { workspaceId: string; path: string };
-                        removeProjectFromWorkspaceState(payload.workspaceId, payload.path);
+                    case 'supervisor:chat:response': {
+                        const payload = message.payload as { message: ChatMessage };
+                        console.log('[WebSocket] Chat message received:', payload.message.role);
+                        addChatMessage(payload.message);
                         break;
                     }
-                    case 'workspace:setActive': {
-                        const payload = message.payload as { workspaceId: string | null };
-                        setActiveWorkspaceId(payload.workspaceId);
+                    case 'supervisor:chat:history': {
+                        const payload = message.payload as { messages: ChatMessage[] };
+                        console.log('[WebSocket] Chat history received:', payload.messages.length, 'messages');
+                        setChatMessages(payload.messages);
+                        break;
+                    }
+                    case 'supervisor:chat:typing': {
+                        const payload = message.payload as { isTyping: boolean };
+                        setChatTyping(payload.isTyping);
+                        break;
+                    }
+                    case 'task:waitingInput': {
+                        const payload = message.payload as {
+                            taskId: string;
+                            inputType: WaitingInputType;
+                            recentOutput: string;
+                        };
+                        console.log('[WebSocket] Task waiting for input:', payload.taskId, payload.inputType);
+                        setWaitingInput({
+                            taskId: payload.taskId,
+                            inputType: payload.inputType,
+                            recentOutput: payload.recentOutput,
+                            timestamp: new Date()
+                        });
+
+                        // Auto-focus on the task if setting is enabled
+                        const { autoFocusOnInput, selectedTaskId } = useTaskStore.getState();
+                        if (autoFocusOnInput && selectedTaskId !== payload.taskId) {
+                            console.log('[WebSocket] Auto-focusing on task:', payload.taskId);
+                            selectTask(payload.taskId);
+
+                            // Dispatch scroll-to-bottom event like handleSelectTask does
+                            setTimeout(() => {
+                                window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
+                                    detail: { taskId: payload.taskId }
+                                }));
+                            }, 100);
+                        }
+                        break;
+                    }
+                    case 'task:stateChanged': {
+                        const payload = message.payload as { task?: Task; tasks?: Task[] };
+                        if (payload.task) {
+                            updateTask(payload.task);
+                            // Clear waiting input notification when task becomes busy
+                            if (payload.task.state === 'busy') {
+                                clearWaitingInput(payload.task.id);
+                            }
+                        }
+                        if (payload.tasks) {
+                            setTasks(payload.tasks);
+                        }
                         break;
                     }
                 }
@@ -188,7 +182,7 @@ export function useWebSocket() {
         };
 
         wsRef.current = ws;
-    }, [setConnected, setTasks, addTask, updateTask, deleteTask, clearTasks, appendOutput, addChatMessage, clearChatMessages, showConversationSelection, setThinking, setPlan, updatePlanStatus, setCurrentProject, setWorkspaces, addWorkspace, removeWorkspace, addProjectToWorkspaceState, removeProjectFromWorkspaceState, setActiveWorkspaceId]);
+    }, [setConnected, setTasks, addTask, updateTask, deleteTask, selectTask, setWorkspaces, addWorkspace, removeWorkspace, setTaskSummary, addChatMessage, setChatMessages, setChatTyping, setWaitingInput, clearWaitingInput]);
 
     const sendMessage = useCallback((type: string, payload: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -196,55 +190,70 @@ export function useWebSocket() {
         }
     }, []);
 
-    const sendChatMessage = useCallback((content: string, images?: ImageAttachment[]) => {
-        setThinking(true);
-        sendMessage('chat:send', { content, images });
-    }, [sendMessage, setThinking]);
+    // Poll task statuses for more reliable state detection
+    const pollTaskStatuses = useCallback(async () => {
+        const { tasks } = useTaskStore.getState();
+
+        for (const [taskId, task] of tasks) {
+            // Only poll active tasks (not disconnected or exited)
+            if (task.state === 'disconnected' || task.state === 'exited') continue;
+
+            try {
+                const response = await fetch(`${API_URL}/api/tasks/${taskId}/status`);
+                if (response.ok) {
+                    const status = await response.json();
+                    // Update state if server state differs from current
+                    if (status.state && status.state !== task.state) {
+                        console.log(`[Poll] Task ${taskId} state: ${task.state} -> ${status.state}`);
+                        updateTask({ ...task, state: status.state as TaskState });
+                    }
+                }
+            } catch (err) {
+                // Ignore polling errors
+            }
+        }
+    }, [updateTask]);
 
     useEffect(() => {
         connect();
+
+        // Start polling for task statuses
+        pollIntervalRef.current = window.setInterval(pollTaskStatuses, STATUS_POLL_INTERVAL);
+
         return () => {
             if (reconnectTimeoutRef.current) {
                 clearTimeout(reconnectTimeoutRef.current);
             }
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+            }
             wsRef.current?.close();
         };
-    }, []); // Empty dependency array - only connect once on mount
+    }, []);
 
-    const selectConversation = useCallback((conversationId: string | null) => {
-        sendMessage('conversation:select', {
-            conversationId,
-            originalMessage: originalMessageRef.current
-        });
-        originalMessageRef.current = null;
+    // Task actions
+    const createTask = useCallback((prompt: string, workspaceId: string) => {
+        sendMessage('task:create', { prompt, workspaceId });
     }, [sendMessage]);
 
-    const sendDeleteTask = useCallback((taskId: string) => {
-        sendMessage('task:delete', { taskId });
+    const selectTaskOnServer = useCallback((taskId: string) => {
+        sendMessage('task:select', { taskId });
     }, [sendMessage]);
 
-    const sendClearTasks = useCallback(() => {
-        sendMessage('task:clear', {});
+    const sendTaskInput = useCallback((taskId: string, input: string) => {
+        sendMessage('task:input', { taskId, input });
     }, [sendMessage]);
 
-    const sendClearChat = useCallback(() => {
-        sendMessage('chat:clear', {});
+    const resizeTask = useCallback((taskId: string, cols: number, rows: number) => {
+        sendMessage('task:resize', { taskId, cols, rows });
     }, [sendMessage]);
 
-    const approvePlan = useCallback(() => {
-        sendMessage('plan:approve', {});
+    const destroyTask = useCallback((taskId: string) => {
+        sendMessage('task:destroy', { taskId });
     }, [sendMessage]);
 
-    const rejectPlan = useCallback(() => {
-        sendMessage('plan:reject', {});
-    }, [sendMessage]);
-
-    const selectProject = useCallback((path: string) => {
-        sendMessage('project:set', { path });
-    }, [sendMessage]);
-
-    const sendAutoApproveUpdate = useCallback((enabled: boolean) => {
-        sendMessage('config:autoApprove', { enabled });
+    const restoreTask = useCallback((taskId: string) => {
+        sendMessage('task:restore', { taskId });
     }, [sendMessage]);
 
     // Workspace actions
@@ -256,37 +265,42 @@ export function useWebSocket() {
         sendMessage('workspace:delete', { workspaceId });
     }, [sendMessage]);
 
-    const setActiveWorkspace = useCallback((workspaceId: string) => {
-        sendMessage('workspace:setActive', { workspaceId });
+    // Supervisor actions
+    const executeSupervisorAction = useCallback((taskId: string, action: SuggestedAction) => {
+        sendMessage('supervisor:action', { taskId, action });
     }, [sendMessage]);
 
-    const sendTaskInput = useCallback((taskId: string, input: string) => {
-        sendMessage('task:input', { taskId, input });
+    const requestTaskAnalysis = useCallback((taskId: string) => {
+        sendMessage('supervisor:analyze', { taskId });
     }, [sendMessage]);
 
-    const sendStopTask = useCallback((taskId: string) => {
-        sendMessage('task:stop', { taskId });
+    // Chat actions
+    const sendChatMessage = useCallback((content: string, taskId?: string) => {
+        sendMessage('supervisor:chat:message', { content, taskId });
     }, [sendMessage]);
 
-    const createTask = useCallback((name: string, description: string, workspaceId: string) => {
-        sendMessage('task:create', { name, description, workspaceId });
+    const requestChatHistory = useCallback(() => {
+        sendMessage('supervisor:chat:history', {});
+    }, [sendMessage]);
+
+    const clearChatHistory = useCallback(() => {
+        sendMessage('supervisor:chat:clear', {});
     }, [sendMessage]);
 
     return {
-        sendChatMessage,
-        selectConversation,
-        sendDeleteTask,
-        sendClearTasks,
-        sendClearChat,
-        approvePlan,
-        rejectPlan,
-        selectProject,
-        sendAutoApproveUpdate,
+        createTask,
+        selectTaskOnServer,
+        sendTaskInput,
+        resizeTask,
+        destroyTask,
+        restoreTask,
         createWorkspace,
         deleteWorkspace,
-        setActiveWorkspace,
-        sendTaskInput,
-        sendStopTask,
-        createTask
+        executeSupervisorAction,
+        requestTaskAnalysis,
+        sendChatMessage,
+        requestChatHistory,
+        clearChatHistory,
+        wsRef
     };
 }

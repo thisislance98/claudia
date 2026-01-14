@@ -103,7 +103,6 @@ export class WorkspaceStore {
         const workspace: Workspace = {
             id: resolvedPath, // id IS the path
             name: resolvedPath.split('/').pop() || resolvedPath,
-            projects: [], // Not used in simplified model
             createdAt: new Date().toISOString()
         };
 

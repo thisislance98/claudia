@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, forwardRef, useImperativeHandle } from 'react';
 import { Mic, MicOff, Loader2 } from 'lucide-react';
 import { useVoiceRecognition } from '../hooks/useVoiceRecognition';
 
@@ -9,7 +9,14 @@ interface VoiceInputProps {
     className?: string;
 }
 
-export function VoiceInput({ onTranscript, disabled = false, continuous = false, className = '' }: VoiceInputProps) {
+export interface VoiceInputHandle {
+    stopListening: () => void;
+}
+
+export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function VoiceInput(
+    { onTranscript, disabled = false, continuous = false, className = '' },
+    ref
+) {
     const [error, setError] = useState<string | null>(null);
 
     const {
@@ -30,6 +37,10 @@ export function VoiceInput({ onTranscript, disabled = false, continuous = false,
             setTimeout(() => setError(null), 3000);
         }
     });
+
+    useImperativeHandle(ref, () => ({
+        stopListening
+    }), [stopListening]);
 
     useEffect(() => {
         // Clean up on unmount
@@ -83,4 +94,4 @@ export function VoiceInput({ onTranscript, disabled = false, continuous = false,
             )}
         </div>
     );
-}
+});

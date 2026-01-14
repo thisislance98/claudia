@@ -1,177 +1,212 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
-    Loader2, CheckCircle, XCircle, Circle, ChevronRight, ChevronDown,
-    Copy, Check, Trash2, FolderOpen, Plus, Briefcase, StopCircle, Square
+    Loader2, CheckCircle, Circle, ChevronRight, ChevronDown,
+    Trash2, FolderOpen, Plus, Briefcase, Send
 } from 'lucide-react';
-import { TaskCreateModal } from './TaskCreateModal';
+import { VoiceInput, VoiceInputHandle } from './VoiceInput';
 import './WorkspacePanel.css';
 
-function getStatusIcon(status: Task['status']) {
-    switch (status) {
-        case 'running':
-            return <Loader2 className="status-icon spinning" size={14} />;
-        case 'complete':
-            return <CheckCircle className="status-icon complete" size={14} />;
-        case 'error':
-            return <XCircle className="status-icon error" size={14} />;
-        case 'stopped':
-            return <StopCircle className="status-icon stopped" size={14} />;
-        case 'pending':
-        default:
-            return <Circle className="status-icon pending" size={14} />;
+// Simple notification sound using Web Audio API
+function playNotificationSound() {
+    try {
+        const audioContext = new (window.AudioContext || (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        oscillator.frequency.value = 800;
+        oscillator.type = 'sine';
+        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.3);
+    } catch (e) {
+        console.warn('Could not play notification sound:', e);
     }
+}
+
+interface StateIconProps {
+    task: Task;
+    hasActiveQuestion: boolean;
+}
+
+function StateIcon({ task, hasActiveQuestion }: StateIconProps) {
+    if (task.state === 'busy') {
+        return <Loader2 className="status-icon spinning" size={14} />;
+    }
+
+    if (task.state === 'waiting_input' && hasActiveQuestion) {
+        return <span className="status-icon question-icon">!</span>;
+    }
+
+    if (task.state === 'idle' || task.state === 'waiting_input') {
+        return <CheckCircle className="status-icon idle" size={14} />;
+    }
+
+    return <Circle className="status-icon" size={14} />;
 }
 
 interface TaskItemProps {
     task: Task;
-    depth?: number;
     onDeleteTask: (taskId: string) => void;
-    onStopTask: (taskId: string) => void;
+    onSelectTask: (taskId: string) => void;
+    isSelected: boolean;
+    hasActiveQuestion: boolean;
 }
 
-function TaskItem({ task, depth = 0, onDeleteTask, onStopTask }: TaskItemProps) {
-    const { selectedTaskId, selectTask, tasks } = useTaskStore();
-    const [copied, setCopied] = useState(false);
-    const isSelected = selectedTaskId === task.id;
-
-    // Find child tasks
-    const children = Array.from(tasks.values()).filter(t => t.parentId === task.id);
-
-    const copyTaskOutput = async (e: React.MouseEvent) => {
-        e.stopPropagation();
-        const output = [
-            `Task: ${task.name}`,
-            `Status: ${task.status}`,
-            `Description: ${task.description}`,
-            '',
-            '--- Output ---',
-            '',
-            ...task.output
-        ].join('\n');
-
-        try {
-            await navigator.clipboard.writeText(output);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
-        } catch (err) {
-            console.error('Failed to copy:', err);
-        }
-    };
-
-    const handleDelete = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        onDeleteTask(task.id);
-    };
-
-    const handleStop = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        onStopTask(task.id);
-    };
+function TaskItem({ task, onDeleteTask, onSelectTask, isSelected, hasActiveQuestion }: TaskItemProps) {
+    // Truncate prompt for display
+    const displayPrompt = task.prompt.length > 50
+        ? task.prompt.substring(0, 50) + '...'
+        : task.prompt;
 
     return (
-        <div className="task-item-container">
-            <div
-                className={`task-item ${isSelected ? 'selected' : ''} ${task.status}`}
-                style={{ paddingLeft: `${8 + depth * 12}px` }}
-                onClick={() => selectTask(task.id)}
+        <div
+            className={`task-item ${isSelected ? 'selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''}`}
+            onClick={() => onSelectTask(task.id)}
+        >
+            <StateIcon task={task} hasActiveQuestion={hasActiveQuestion} />
+            <span className="task-prompt" title={task.prompt}>{displayPrompt}</span>
+            <button
+                className="task-action-button delete"
+                onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
+                title="Delete task"
             >
-                {getStatusIcon(task.status)}
-                <span className="task-name">{task.name}</span>
-                {task.status === 'running' && (
-                    <button
-                        className="task-action-button stop"
-                        onClick={handleStop}
-                        title="Stop task"
-                    >
-                        <Square size={10} />
-                    </button>
-                )}
-                <button
-                    className={`task-action-button ${copied ? 'copied' : ''}`}
-                    onClick={copyTaskOutput}
-                    title="Copy task output"
-                >
-                    {copied ? <Check size={10} /> : <Copy size={10} />}
-                </button>
-                <button
-                    className="task-action-button delete"
-                    onClick={handleDelete}
-                    title="Delete task"
-                >
-                    <Trash2 size={10} />
-                </button>
-            </div>
-            {children.map(child => (
-                <TaskItem key={child.id} task={child} depth={depth + 1} onDeleteTask={onDeleteTask} onStopTask={onStopTask} />
-            ))}
+                <Trash2 size={12} />
+            </button>
         </div>
     );
 }
 
 interface WorkspaceSectionProps {
     workspace: Workspace;
-    tasks: Map<string, Task>;
+    tasks: Task[];
+    waitingInputTaskIds: Set<string>;
+    selectedTaskId: string | null;
+    isExpanded: boolean;
+    onToggleExpand: () => void;
     onDeleteTask: (taskId: string) => void;
-    onStopTask: (taskId: string) => void;
+    onSelectTask: (taskId: string) => void;
     onDeleteWorkspace: () => void;
-    onAddTask: (workspaceId: string) => void;
+    onCreateTask: (prompt: string) => void;
 }
 
 function WorkspaceSection({
     workspace,
     tasks,
+    waitingInputTaskIds,
+    selectedTaskId,
+    isExpanded,
+    onToggleExpand,
     onDeleteTask,
-    onStopTask,
+    onSelectTask,
     onDeleteWorkspace,
-    onAddTask
+    onCreateTask
 }: WorkspaceSectionProps) {
-    const { expandedWorkspaces, toggleWorkspaceExpanded } = useTaskStore();
-    const isExpanded = expandedWorkspaces.has(workspace.id);
+    const [inputValue, setInputValue] = useState('');
+    const [interimTranscript, setInterimTranscript] = useState('');
+    const voiceInputRef = useRef<VoiceInputHandle>(null);
 
-    // Get tasks for this workspace (matching projectPath to workspace path)
-    const workspaceTasks = Array.from(tasks.values()).filter(t =>
-        !t.parentId && t.projectPath === workspace.id
-    );
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        // Stop voice recording when submitting
+        voiceInputRef.current?.stopListening();
+        if (inputValue.trim()) {
+            onCreateTask(inputValue.trim());
+            setInputValue('');
+            setInterimTranscript('');
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSubmit(e);
+        }
+    };
+
+    const handleVoiceTranscript = (text: string, isFinal: boolean) => {
+        if (isFinal) {
+            setInputValue(prev => (prev ? prev + ' ' : '') + text);
+            setInterimTranscript('');
+        } else {
+            setInterimTranscript(text);
+        }
+    };
 
     return (
         <div className="workspace-section">
             <div className="workspace-header">
-                <div className="workspace-header-left" onClick={() => toggleWorkspaceExpanded(workspace.id)}>
+                <div className="workspace-header-left" onClick={onToggleExpand}>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     <Briefcase size={16} className="workspace-icon" />
                     <span className="workspace-name" title={workspace.id}>{workspace.name}</span>
-                    {workspaceTasks.length > 0 && (
-                        <span className="workspace-task-count">{workspaceTasks.length}</span>
+                    {tasks.length > 0 && (
+                        <span className="workspace-task-count">{tasks.length}</span>
                     )}
                 </div>
-                <div className="workspace-header-actions">
-                    <button
-                        className="workspace-action-button delete"
-                        onClick={(e) => { e.stopPropagation(); onDeleteWorkspace(); }}
-                        title="Remove workspace"
-                    >
-                        <Trash2 size={16} />
-                    </button>
-                    <button
-                        className="workspace-action-button add"
-                        onClick={(e) => { e.stopPropagation(); onAddTask(workspace.id); }}
-                        title="Add task to this workspace"
-                    >
-                        <Plus size={16} />
-                    </button>
-                </div>
+                <button
+                    className="workspace-action-button delete"
+                    onClick={(e) => { e.stopPropagation(); onDeleteWorkspace(); }}
+                    title="Remove workspace"
+                >
+                    <Trash2 size={14} />
+                </button>
             </div>
             {isExpanded && (
                 <div className="workspace-content">
-                    {workspaceTasks.length === 0 ? (
+                    {tasks.length === 0 ? (
                         <div className="empty-tasks">No tasks yet</div>
                     ) : (
-                        workspaceTasks.map(task => (
-                            <TaskItem key={task.id} task={task} onDeleteTask={onDeleteTask} onStopTask={onStopTask} />
-                        ))
+                        <div className="task-list">
+                            {tasks.map(task => (
+                                <TaskItem
+                                    key={task.id}
+                                    task={task}
+                                    isSelected={selectedTaskId === task.id}
+                                    hasActiveQuestion={waitingInputTaskIds.has(task.id)}
+                                    onDeleteTask={onDeleteTask}
+                                    onSelectTask={onSelectTask}
+                                />
+                            ))}
+                        </div>
                     )}
+                    <form className="task-input-form" onSubmit={handleSubmit}>
+                        <div className="task-input-wrapper">
+                            <input
+                                type="text"
+                                className="task-input"
+                                placeholder="Type or speak a task..."
+                                value={inputValue + (interimTranscript ? (inputValue ? ' ' : '') + interimTranscript : '')}
+                                onChange={(e) => {
+                                    setInputValue(e.target.value);
+                                    setInterimTranscript('');
+                                }}
+                                onKeyDown={handleKeyDown}
+                            />
+                            {interimTranscript && (
+                                <span className="interim-indicator">listening...</span>
+                            )}
+                        </div>
+                        <VoiceInput
+                            ref={voiceInputRef}
+                            onTranscript={handleVoiceTranscript}
+                            className="task-voice-button"
+                            continuous={true}
+                        />
+                        <button
+                            type="submit"
+                            className="task-submit-button"
+                            disabled={!inputValue.trim() && !interimTranscript.trim()}
+                        >
+                            <Send size={16} />
+                        </button>
+                    </form>
                 </div>
             )}
         </div>
@@ -180,54 +215,71 @@ function WorkspaceSection({
 
 interface WorkspacePanelProps {
     onDeleteTask: (taskId: string) => void;
-    onClearTasks: () => void;
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
-    onStopTask: (taskId: string) => void;
-    onCreateTask: (name: string, description: string, workspaceId: string) => void;
+    onCreateTask: (prompt: string, workspaceId: string) => void;
+    onSelectTask: (taskId: string) => void;
 }
 
 export function WorkspacePanel({
     onDeleteTask,
-    // onClearTasks,
-    // onCreateWorkspace,
     onDeleteWorkspace,
-    onStopTask,
-    onCreateTask
+    onCreateTask,
+    onSelectTask
 }: WorkspacePanelProps) {
     const {
         tasks,
         workspaces,
+        selectedTaskId,
+        expandedWorkspaces,
+        toggleWorkspaceExpanded,
         setShowProjectPicker,
-        showTaskCreateModal,
-        taskCreateWorkspaceId,
-        setShowTaskCreateModal
+        waitingInputNotifications
     } = useTaskStore();
+
+    const prevWaitingRef = useRef<Set<string>>(new Set());
+
+    // Play sound when a new task starts waiting for input
+    useEffect(() => {
+        const currentWaiting = new Set(waitingInputNotifications.keys());
+        const prevWaiting = prevWaitingRef.current;
+
+        // Check for newly added waiting tasks
+        for (const taskId of currentWaiting) {
+            if (!prevWaiting.has(taskId)) {
+                // New task waiting for input - play sound
+                playNotificationSound();
+                break; // Only play once even if multiple new
+            }
+        }
+
+        prevWaitingRef.current = currentWaiting;
+    }, [waitingInputNotifications]);
 
     const handleAddWorkspace = () => {
         setShowProjectPicker(true);
     };
 
-    const handleAddTask = (workspaceId: string) => {
-        setShowTaskCreateModal(true, workspaceId);
-    };
+    // Get task IDs that have active questions
+    const waitingInputTaskIds = new Set(waitingInputNotifications.keys());
 
-    const handleCloseTaskModal = () => {
-        setShowTaskCreateModal(false);
+    // Group tasks by workspace, sorted by creation time (newest first)
+    const getTasksForWorkspace = (workspaceId: string): Task[] => {
+        return Array.from(tasks.values())
+            .filter(t => t.workspaceId === workspaceId)
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     };
-
-    const selectedWorkspace = workspaces.find(w => w.id === taskCreateWorkspaceId);
 
     return (
         <div className="workspace-panel">
             <div className="workspace-panel-header">
-                <h2>📁 Workspaces</h2>
+                <h2>Workspaces</h2>
                 <button
                     className="add-workspace-button"
                     onClick={handleAddWorkspace}
                     title="Add workspace"
                 >
-                    <Plus size={14} />
+                    <Plus size={16} />
                 </button>
             </div>
 
@@ -247,23 +299,19 @@ export function WorkspacePanel({
                         <WorkspaceSection
                             key={workspace.id}
                             workspace={workspace}
-                            tasks={tasks}
+                            tasks={getTasksForWorkspace(workspace.id)}
+                            waitingInputTaskIds={waitingInputTaskIds}
+                            selectedTaskId={selectedTaskId}
+                            isExpanded={expandedWorkspaces.has(workspace.id)}
+                            onToggleExpand={() => toggleWorkspaceExpanded(workspace.id)}
                             onDeleteTask={onDeleteTask}
-                            onStopTask={onStopTask}
+                            onSelectTask={onSelectTask}
                             onDeleteWorkspace={() => onDeleteWorkspace(workspace.id)}
-                            onAddTask={handleAddTask}
+                            onCreateTask={(prompt) => onCreateTask(prompt, workspace.id)}
                         />
                     ))
                 )}
             </div>
-            {showTaskCreateModal && selectedWorkspace && (
-                <TaskCreateModal
-                    workspaceId={selectedWorkspace.id}
-                    workspaceName={selectedWorkspace.name}
-                    onClose={handleCloseTaskModal}
-                    onCreateTask={onCreateTask}
-                />
-            )}
         </div>
     );
 }
