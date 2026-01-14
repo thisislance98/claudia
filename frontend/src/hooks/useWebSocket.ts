@@ -16,6 +16,7 @@ export function useWebSocket() {
 
     const {
         setConnected,
+        setServerReloading,
         setTasks,
         addTask,
         updateTask,
@@ -69,12 +70,15 @@ export function useWebSocket() {
                         if (payload.workspaces) {
                             setWorkspaces(payload.workspaces);
                         }
-                        // Fetch config to get autoFocusOnInput setting
+                        // Fetch config to get settings
                         fetch(`${API_URL}/api/config`)
                             .then(res => res.json())
                             .then(config => {
                                 if (config.autoFocusOnInput !== undefined) {
                                     useTaskStore.getState().setAutoFocusOnInput(config.autoFocusOnInput);
+                                }
+                                if (config.supervisorEnabled !== undefined) {
+                                    useTaskStore.getState().setSupervisorEnabled(config.supervisorEnabled);
                                 }
                             })
                             .catch(err => console.error('Failed to fetch config:', err));
@@ -173,6 +177,11 @@ export function useWebSocket() {
                         if (payload.tasks) {
                             setTasks(payload.tasks);
                         }
+                        break;
+                    }
+                    case 'server:reloading': {
+                        console.log('[WebSocket] Server is reloading (hot reload)');
+                        setServerReloading(true);
                         break;
                     }
                 }

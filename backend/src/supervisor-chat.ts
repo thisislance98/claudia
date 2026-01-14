@@ -9,11 +9,17 @@
  */
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { TaskSpawner } from './task-spawner.js';
 import { ConfigStore } from './config-store.js';
 import { getConversationHistory, ConversationMessage } from './conversation-parser.js';
 import { ChatMessage, Task, SuggestedAction } from '@claudia/shared';
 import { randomUUID } from 'crypto';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Tool definitions for the supervisor
 interface ToolDefinition {
@@ -114,6 +120,10 @@ const TOOLS: ToolDefinition[] = [
     }
 ];
 
+// Path for chat history persistence
+const CHAT_HISTORY_FILE = join(__dirname, '..', 'chat-history.json');
+const MAX_HISTORY_MESSAGES = 200; // Limit history to prevent unbounded growth
+
 export class SupervisorChat extends EventEmitter {
     private taskSpawner: TaskSpawner;
     private workspaceStore: { getWorkspaces: () => { id: string; name: string }[] };
@@ -121,6 +131,7 @@ export class SupervisorChat extends EventEmitter {
     private chatHistory: ChatMessage[] = [];
     private isProcessing: boolean = false;
     private processingTasks: Set<string> = new Set();  // Prevent duplicate auto-analysis
+    private saveDebounceTimer: NodeJS.Timeout | null = null;
 
     constructor(
         taskSpawner: TaskSpawner,
@@ -132,8 +143,59 @@ export class SupervisorChat extends EventEmitter {
         this.workspaceStore = workspaceStore;
         this.configStore = configStore;
 
+        // Load persisted chat history
+        this.loadChatHistory();
+
         // Set up auto-analysis on task state changes
         this.setupTaskListeners();
+    }
+
+    /**
+     * Load chat history from disk
+     */
+    private loadChatHistory(): void {
+        try {
+            if (existsSync(CHAT_HISTORY_FILE)) {
+                const data = readFileSync(CHAT_HISTORY_FILE, 'utf-8');
+                const parsed = JSON.parse(data);
+                if (Array.isArray(parsed)) {
+                    this.chatHistory = parsed;
+                    console.log(`[SupervisorChat] Loaded ${this.chatHistory.length} messages from history`);
+                }
+            }
+        } catch (error) {
+            console.error('[SupervisorChat] Failed to load chat history:', error);
+            this.chatHistory = [];
+        }
+    }
+
+    /**
+     * Save chat history to disk (debounced)
+     */
+    private saveChatHistory(): void {
+        // Debounce saves to avoid excessive disk I/O
+        if (this.saveDebounceTimer) {
+            clearTimeout(this.saveDebounceTimer);
+        }
+        this.saveDebounceTimer = setTimeout(() => {
+            this.saveChatHistoryNow();
+        }, 500);
+    }
+
+    /**
+     * Save chat history immediately (used for graceful shutdown)
+     */
+    saveChatHistoryNow(): void {
+        try {
+            // Trim history if too long
+            if (this.chatHistory.length > MAX_HISTORY_MESSAGES) {
+                this.chatHistory = this.chatHistory.slice(-MAX_HISTORY_MESSAGES);
+            }
+            writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(this.chatHistory, null, 2));
+            console.log(`[SupervisorChat] Saved ${this.chatHistory.length} messages to history`);
+        } catch (error) {
+            console.error('[SupervisorChat] Failed to save chat history:', error);
+        }
     }
 
     /**
@@ -182,6 +244,7 @@ export class SupervisorChat extends EventEmitter {
         };
 
         this.chatHistory.push(message);
+        this.saveChatHistory();
         this.emit('message', message);
     }
 
@@ -253,6 +316,7 @@ Keep your response concise and actionable.`;
             };
 
             this.chatHistory.push(assistantMessage);
+            this.saveChatHistory();
             this.emit('message', assistantMessage);
 
             console.log(`[SupervisorChat] Auto-analysis complete for task ${task.id}`);
@@ -268,6 +332,7 @@ Keep your response concise and actionable.`;
                 taskId: task.id
             };
             this.chatHistory.push(fallbackMessage);
+            this.saveChatHistory();
             this.emit('message', fallbackMessage);
         } finally {
             this.processingTasks.delete(task.id);
@@ -376,6 +441,7 @@ Keep your response concise and actionable.`;
                 taskId
             };
             this.chatHistory.push(userMessage);
+            this.saveChatHistory();
             this.emit('message', userMessage);
 
             // Get context about tasks
@@ -408,6 +474,7 @@ Keep your response concise and actionable.`;
                 taskId
             };
             this.chatHistory.push(assistantMessage);
+            this.saveChatHistory();
             this.emit('message', assistantMessage);
 
             return assistantMessage;
@@ -423,6 +490,7 @@ Keep your response concise and actionable.`;
                 taskId
             };
             this.chatHistory.push(errorMessage);
+            this.saveChatHistory();
             this.emit('message', errorMessage);
 
             return errorMessage;
@@ -931,6 +999,7 @@ Do NOT use JSON format for this response - just provide a natural language respo
      */
     clearHistory(): void {
         this.chatHistory = [];
+        this.saveChatHistory();
         this.emit('historyCleared');
     }
 
@@ -939,6 +1008,7 @@ Do NOT use JSON format for this response - just provide a natural language respo
      */
     clearTaskHistory(taskId: string): void {
         this.chatHistory = this.chatHistory.filter(msg => msg.taskId !== taskId);
+        this.saveChatHistory();
         this.emit('taskHistoryCleared', taskId);
     }
 }

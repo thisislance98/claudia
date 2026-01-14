@@ -316,6 +316,18 @@
     font-size: 0.8125rem;
 }
 
+.workspace-panel .task-item .task-prompt {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.workspace-panel .task-item .task-action-button.delete {
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
 .workspace-panel .task-item:hover {
     background: var(--bg-tertiary);
 }

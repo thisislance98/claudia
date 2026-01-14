@@ -454,20 +454,32 @@ export function createApp(basePath?: string) {
         }
     });
 
-    // Cleanup on server shutdown
-    process.on('SIGINT', () => {
-        console.log('[Server] Shutting down (SIGINT), saving tasks...');
-        taskSpawner.saveNow();
-        taskSpawner.destroy();
-        process.exit();
-    });
+    // Graceful shutdown handler
+    function gracefulShutdown(signal: string): void {
+        console.log(`[Server] Shutting down (${signal}), notifying clients and saving state...`);
 
-    process.on('SIGTERM', () => {
-        console.log('[Server] Shutting down (SIGTERM), saving tasks...');
-        taskSpawner.saveNow();
-        taskSpawner.destroy();
-        process.exit();
-    });
+        // Notify all connected clients that the server is reloading
+        broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
+
+        // Give clients a moment to receive the message
+        setTimeout(() => {
+            // Save all state
+            taskSpawner.saveNow();
+            supervisorChat.saveChatHistoryNow();
+            taskSpawner.destroy();
+
+            // Close WebSocket connections gracefully
+            for (const client of clients) {
+                client.close(1001, 'Server reloading');
+            }
+
+            process.exit(0);
+        }, 100);
+    }
+
+    // Cleanup on server shutdown
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
     return { app, server, wss, taskSpawner, workspaceStore };
 }

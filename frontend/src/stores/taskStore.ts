@@ -21,6 +21,7 @@ interface TaskStore {
     tasks: Map<string, Task>;
     selectedTaskId: string | null;
     isConnected: boolean;
+    isServerReloading: boolean;  // True when server is restarting (hot reload)
 
     // Workspace state
     workspaces: Workspace[];
@@ -47,9 +48,11 @@ interface TaskStore {
 
     // Settings
     autoFocusOnInput: boolean;
+    supervisorEnabled: boolean;
 
     // Actions
     setConnected: (connected: boolean) => void;
+    setServerReloading: (reloading: boolean) => void;
     selectTask: (id: string | null) => void;
     setTasks: (tasks: Task[]) => void;
     addTask: (task: Task) => void;
@@ -84,6 +87,7 @@ interface TaskStore {
 
     // Settings actions
     setAutoFocusOnInput: (enabled: boolean) => void;
+    setSupervisorEnabled: (enabled: boolean) => void;
 }
 
 export const useTaskStore = create<TaskStore>((set, get) => ({
@@ -91,6 +95,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     tasks: new Map(),
     selectedTaskId: null,
     isConnected: false,
+    isServerReloading: false,
     workspaces: [],
     expandedWorkspaces: new Set<string>(),
     showProjectPicker: false,
@@ -115,9 +120,19 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
 
     // Settings initial state
     autoFocusOnInput: false,
+    supervisorEnabled: false,
 
     // Actions
-    setConnected: (connected) => set({ isConnected: connected }),
+    setConnected: (connected) => {
+        // Clear reloading state when we reconnect
+        if (connected) {
+            set({ isConnected: connected, isServerReloading: false });
+        } else {
+            set({ isConnected: connected });
+        }
+    },
+
+    setServerReloading: (reloading) => set({ isServerReloading: reloading }),
 
     selectTask: (id) => set({ selectedTaskId: id }),
 
@@ -241,5 +256,6 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     },
 
     // Settings actions
-    setAutoFocusOnInput: (enabled) => set({ autoFocusOnInput: enabled })
+    setAutoFocusOnInput: (enabled) => set({ autoFocusOnInput: enabled }),
+    setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled })
 }));

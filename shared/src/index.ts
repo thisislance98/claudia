@@ -82,6 +82,7 @@ export type WSMessageType =
     | 'supervisor:chat:response'
     | 'supervisor:chat:history'
     | 'supervisor:chat:typing'
+    | 'server:reloading'
     | 'init';
 
 export interface WSMessage {

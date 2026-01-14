@@ -6,7 +6,7 @@ import { ProjectPicker } from './components/ProjectPicker';
 import { SettingsMenu } from './components/SettingsMenu';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw } from 'lucide-react';
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
 const DEFAULT_SIDEBAR_WIDTH = 640;
@@ -24,7 +24,7 @@ function App() {
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, setShowProjectPicker, chatMessages, chatTyping } = useTaskStore();
+    const { selectedTaskId, tasks, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, supervisorEnabled } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
 
     const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -130,6 +130,13 @@ function App() {
     // Count unread messages indicator
     const hasUnreadMessages = chatMessages.length > 0 && !showChatPanel;
 
+    // Close chat panel if supervisor is disabled
+    useEffect(() => {
+        if (!supervisorEnabled && showChatPanel) {
+            setShowChatPanel(false);
+        }
+    }, [supervisorEnabled, showChatPanel]);
+
     return (
         <div className="app">
             <header className="app-header">
@@ -138,15 +145,17 @@ function App() {
                     <h1>Claudia</h1>
                 </div>
                 <div className="header-controls">
-                    <button
-                        className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
-                        onClick={() => setShowChatPanel(!showChatPanel)}
-                        title={showChatPanel ? 'Close Chat' : 'Open Chat'}
-                    >
-                        <MessageCircle size={18} />
-                        <span>Chat</span>
-                        {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
-                    </button>
+                    {supervisorEnabled && (
+                        <button
+                            className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
+                            onClick={() => setShowChatPanel(!showChatPanel)}
+                            title={showChatPanel ? 'Close Chat' : 'Open Chat'}
+                        >
+                            <MessageCircle size={18} />
+                            <span>Chat</span>
+                            {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
+                        </button>
+                    )}
                     <button
                         className="settings-button"
                         onClick={() => setShowSettings(true)}
@@ -223,6 +232,20 @@ function App() {
 
             <ProjectPicker onSelect={handleProjectSelect} />
             <SettingsMenu isOpen={showSettings} onClose={() => setShowSettings(false)} />
+
+            {/* Server reloading overlay */}
+            {(isServerReloading || !isConnected) && (
+                <div className="server-reload-overlay">
+                    <div className="server-reload-content">
+                        <RefreshCw className="spinning" size={32} />
+                        <span>
+                            {isServerReloading
+                                ? 'Backend is restarting...'
+                                : 'Reconnecting to backend...'}
+                        </span>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
