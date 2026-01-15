@@ -143,6 +143,21 @@ export function createApp(basePath?: string) {
         });
     });
 
+    // Reconnection events - notify clients about reconnection progress
+    taskSpawner.on('reconnectStart', (count: number) => {
+        console.log(`[Server] Reconnection started for ${count} tasks`);
+        broadcast({
+            type: 'server:reconnecting' as WSMessageType,
+            payload: { message: `Reconnecting ${count} task(s)...`, count }
+        });
+    });
+
+    taskSpawner.on('reconnectComplete', (result: { total: number; failed: number; failedIds: string[] }) => {
+        console.log(`[Server] Reconnection complete: ${result.total - result.failed}/${result.total} tasks`);
+        // Send updated task list after reconnection
+        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+    });
+
     // Wire up SupervisorChat events (handles both auto-analysis and user chat)
     supervisorChat.on('message', (message: ChatMessage) => {
         broadcast({ type: 'supervisor:chat:response' as WSMessageType, payload: { message } });
@@ -153,11 +168,22 @@ export function createApp(basePath?: string) {
     });
 
     // WebSocket connection handling
-    wss.on('connection', (ws: WebSocket) => {
+    wss.on('connection', async (ws: WebSocket) => {
         console.log('[Server] Client connected');
         clients.add(ws);
 
-        // Send current state to new client
+        // If reconnection is in progress, send a status message and wait
+        if (taskSpawner.isReconnectInProgress()) {
+            console.log('[Server] Reconnection in progress, notifying client...');
+            ws.send(JSON.stringify({
+                type: 'server:reconnecting',
+                payload: { message: 'Reconnecting tasks...' }
+            }));
+            // Wait for reconnection to complete before sending init
+            await taskSpawner.waitForReconnect();
+        }
+
+        // Send current state to new client (after reconnection completes)
         const tasks = taskSpawner.getAllTasks();
         const workspaces = workspaceStore.getWorkspaces();
         ws.send(JSON.stringify({
@@ -735,9 +761,10 @@ export function createApp(basePath?: string) {
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
 
-        // Give clients a moment to receive the message
+        // Give clients enough time to receive the message and for I/O to complete
+        // 500ms provides a good balance between responsiveness and reliability
         setTimeout(() => {
-            // Save all state
+            // Save all state synchronously before exit
             taskSpawner.saveNow();
             supervisorChat.saveChatHistoryNow();
             taskSpawner.destroy();
@@ -747,8 +774,9 @@ export function createApp(basePath?: string) {
                 client.close(1001, 'Server reloading');
             }
 
+            console.log('[Server] Shutdown complete');
             process.exit(0);
-        }, 100);
+        }, 500);
     }
 
     // Cleanup on server shutdown

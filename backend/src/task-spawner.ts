@@ -55,6 +55,7 @@ interface TaskPersistence {
 interface InternalTask extends Task {
     process: IPty;
     outputHistory: Buffer[];
+    previousHistory?: Buffer; // Historical output from before reconnection (kept separate)
     isActive: boolean;
     initialPromptSent: boolean;
     pendingPrompt: string | null;
@@ -81,6 +82,8 @@ export class TaskSpawner extends EventEmitter {
     private saveDebounceTimer: NodeJS.Timeout | null = null;
     private configStore: ConfigStore | null = null;
     private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number }> = new Map();
+    private autoReconnectPromise: Promise<void> | null = null;
+    private isReconnecting: boolean = false;
 
     constructor(persistencePath?: string, autoReconnect: boolean = true, configStore?: ConfigStore) {
         super();
@@ -88,16 +91,42 @@ export class TaskSpawner extends EventEmitter {
         this.configStore = configStore || null;
         this.loadPersistedTasks();
 
-        if (autoReconnect) {
-            setTimeout(() => this.autoReconnectTasks(), 1000);
+        if (autoReconnect && this.disconnectedTasks.size > 0) {
+            // Start auto-reconnect immediately but track the promise
+            this.autoReconnectPromise = this.autoReconnectTasks();
         }
+    }
+
+    /**
+     * Wait for auto-reconnect to complete (if in progress)
+     * Returns immediately if no reconnection is happening
+     */
+    async waitForReconnect(): Promise<void> {
+        if (this.autoReconnectPromise) {
+            await this.autoReconnectPromise;
+        }
+    }
+
+    /**
+     * Check if reconnection is currently in progress
+     */
+    isReconnectInProgress(): boolean {
+        return this.isReconnecting;
     }
 
     private async autoReconnectTasks(): Promise<void> {
         const disconnectedIds = Array.from(this.disconnectedTasks.keys());
-        if (disconnectedIds.length === 0) return;
+        if (disconnectedIds.length === 0) {
+            this.autoReconnectPromise = null;
+            return;
+        }
 
+        this.isReconnecting = true;
+        this.emit('reconnectStart', disconnectedIds.length);
         console.log(`[TaskSpawner] Auto-reconnecting ${disconnectedIds.length} disconnected tasks...`);
+
+        const MAX_RETRIES = 2;
+        const failedTasks: string[] = [];
 
         for (let i = 0; i < disconnectedIds.length; i++) {
             const taskId = disconnectedIds[i];
@@ -106,23 +135,50 @@ export class TaskSpawner extends EventEmitter {
 
             console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${disconnectedIds.length}: ${taskId}`);
 
-            try {
-                const task = this.reconnectTask(taskId);
-                if (task) {
-                    console.log(`[TaskSpawner] Successfully reconnected task ${taskId}`);
-                } else {
-                    console.log(`[TaskSpawner] Failed to reconnect task ${taskId}`);
+            let success = false;
+            for (let attempt = 1; attempt <= MAX_RETRIES && !success; attempt++) {
+                try {
+                    const task = this.reconnectTask(taskId);
+                    if (task) {
+                        console.log(`[TaskSpawner] Successfully reconnected task ${taskId}`);
+                        success = true;
+                    } else {
+                        console.log(`[TaskSpawner] Failed to reconnect task ${taskId} (attempt ${attempt}/${MAX_RETRIES})`);
+                        if (attempt < MAX_RETRIES) {
+                            await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); // Exponential backoff
+                        }
+                    }
+                } catch (error) {
+                    console.error(`[TaskSpawner] Error reconnecting task ${taskId} (attempt ${attempt}/${MAX_RETRIES}):`, error);
+                    if (attempt < MAX_RETRIES) {
+                        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                    }
                 }
-            } catch (error) {
-                console.error(`[TaskSpawner] Error reconnecting task ${taskId}:`, error);
             }
 
+            if (!success) {
+                failedTasks.push(taskId);
+            }
+
+            // Small delay between tasks to avoid overwhelming the system
             if (i < disconnectedIds.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 500));
+                await new Promise(resolve => setTimeout(resolve, 300));
             }
         }
 
-        console.log(`[TaskSpawner] Auto-reconnect complete`);
+        this.isReconnecting = false;
+        this.autoReconnectPromise = null;
+        this.emit('reconnectComplete', {
+            total: disconnectedIds.length,
+            failed: failedTasks.length,
+            failedIds: failedTasks
+        });
+
+        if (failedTasks.length > 0) {
+            console.log(`[TaskSpawner] Auto-reconnect complete. ${failedTasks.length} task(s) failed to reconnect.`);
+        } else {
+            console.log(`[TaskSpawner] Auto-reconnect complete. All tasks reconnected successfully.`);
+        }
     }
 
     private loadPersistedTasks(): void {
@@ -153,7 +209,13 @@ export class TaskSpawner extends EventEmitter {
             const tasksToSave: PersistedTask[] = [];
 
             for (const task of this.tasks.values()) {
-                const historyBuffer = Buffer.concat(task.outputHistory);
+                // Combine previous history + current output for persistence
+                const buffers: Buffer[] = [];
+                if (task.previousHistory) {
+                    buffers.push(task.previousHistory);
+                }
+                buffers.push(...task.outputHistory);
+                const historyBuffer = Buffer.concat(buffers);
                 const historyBase64 = historyBuffer.toString('base64');
 
                 // Track if task was busy when being saved (will be interrupted)
@@ -758,8 +820,9 @@ export class TaskSpawner extends EventEmitter {
                     task.isActive = true;
                     this.emit('tasksUpdated');
 
-                    if (task.outputHistory.length > 0) {
-                        const history = task.outputHistory.map(buf => buf.toString('utf8')).join('');
+                    // Send combined history: previous + current
+                    const history = this.getCombinedHistory(task);
+                    if (history) {
                         this.emit('taskRestore', task.id, history);
                     }
                 }
@@ -771,11 +834,34 @@ export class TaskSpawner extends EventEmitter {
         if (task) {
             task.isActive = active;
 
-            if (active && task.outputHistory.length > 0) {
-                const history = task.outputHistory.map(buf => buf.toString('utf8')).join('');
-                this.emit('taskRestore', task.id, history);
+            if (active) {
+                // Send combined history: previous + current
+                const history = this.getCombinedHistory(task);
+                if (history) {
+                    this.emit('taskRestore', task.id, history);
+                }
             }
         }
+    }
+
+    /**
+     * Get combined history: previous session output + current session output
+     * This ensures historical terminal output is shown before live output
+     */
+    private getCombinedHistory(task: InternalTask): string | null {
+        const parts: string[] = [];
+
+        // Add previous history first (from before reconnection)
+        if (task.previousHistory) {
+            parts.push(task.previousHistory.toString('utf8'));
+        }
+
+        // Then add current session output
+        if (task.outputHistory.length > 0) {
+            parts.push(task.outputHistory.map(buf => buf.toString('utf8')).join(''));
+        }
+
+        return parts.length > 0 ? parts.join('') : null;
     }
 
     writeToTask(taskId: string, data: string): void {
@@ -906,17 +992,18 @@ export class TaskSpawner extends EventEmitter {
 
         const now = new Date();
 
-        let restoredHistory: Buffer[] = [];
+        // Restore previous history as a separate buffer (not mixed with live output)
+        let previousHistory: Buffer | undefined;
         if (persisted.outputHistory) {
             try {
-                const historyBuffer = Buffer.from(persisted.outputHistory, 'base64');
-                restoredHistory = [historyBuffer];
-                console.log(`[TaskSpawner] Restored ${historyBuffer.length} bytes of history`);
+                previousHistory = Buffer.from(persisted.outputHistory, 'base64');
+                console.log(`[TaskSpawner] Restored ${previousHistory.length} bytes of history`);
             } catch (_e) {
                 console.error(`[TaskSpawner] Failed to restore history`);
             }
         }
 
+        // Create a separator message for the live output stream
         const resumeMessage = persisted.sessionId
             ? `\r\n\x1b[90m─── Resuming session ${persisted.sessionId} ───\x1b[0m\r\n\r\n`
             : `\r\n\x1b[90m─── Session reconnected ───\x1b[0m\r\n\r\n`;
@@ -927,7 +1014,8 @@ export class TaskSpawner extends EventEmitter {
             workspaceId: persisted.workspaceId,
             process: ptyProcess,
             state: 'idle',  // Start as idle on reconnect
-            outputHistory: [...restoredHistory, Buffer.from(resumeMessage)],
+            outputHistory: [Buffer.from(resumeMessage)], // Start fresh, only resume message
+            previousHistory, // Keep historical output separate
             lastActivity: now,
             createdAt: new Date(persisted.createdAt),
             isActive: false,

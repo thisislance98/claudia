@@ -195,6 +195,13 @@ export function useWebSocket() {
                         setServerReloading(true);
                         break;
                     }
+                    case 'server:reconnecting': {
+                        const payload = message.payload as { message?: string };
+                        console.log('[WebSocket] Server is reconnecting tasks:', payload.message);
+                        // Show reconnecting state in UI (reuse reloading state for now)
+                        setServerReloading(true);
+                        break;
+                    }
                 }
             } catch (err) {
                 console.error('[WebSocket] Error parsing message:', err);
