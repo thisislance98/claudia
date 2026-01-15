@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, Cloud, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import './SettingsMenu.css';
@@ -15,6 +15,15 @@ interface MCPServer {
     args?: string[];
     env?: Record<string, string>;
     enabled: boolean;
+}
+
+interface AICoreCredentials {
+    clientId: string;
+    clientSecret: string;
+    authUrl: string;
+    baseUrl: string;
+    resourceGroup: string;
+    timeoutMs: number;
 }
 
 interface CollapsiblePanelProps {
@@ -51,7 +60,8 @@ export function SettingsMenu({ isOpen, onClose }: SettingsMenuProps) {
         mcp: false,
         permissions: false,
         rules: false,
-        supervisor: false
+        supervisor: false,
+        aicore: false
     });
 
     const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
@@ -64,6 +74,19 @@ export function SettingsMenu({ isOpen, onClose }: SettingsMenuProps) {
     const [supervisorSystemPrompt, setSupervisorSystemPrompt] = useState('');
     const [supervisorPromptSaved, setSupervisorPromptSaved] = useState(true);
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
+
+    // AI Core credentials state
+    const [aiCoreCredentials, setAiCoreCredentials] = useState<AICoreCredentials>({
+        clientId: '',
+        clientSecret: '',
+        authUrl: '',
+        baseUrl: '',
+        resourceGroup: 'default',
+        timeoutMs: 120000
+    });
+    const [aiCoreSaved, setAiCoreSaved] = useState(true);
+    const [aiCoreTestStatus, setAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [aiCoreTestMessage, setAiCoreTestMessage] = useState('');
 
     useEffect(() => {
         if (isOpen) {
@@ -84,6 +107,10 @@ export function SettingsMenu({ isOpen, onClose }: SettingsMenuProps) {
                 setSupervisorSystemPrompt(config.supervisorSystemPrompt || '');
                 setSupervisorPromptSaved(true);
                 setAutoFocusOnInput(config.autoFocusOnInput || false);
+                if (config.aiCoreCredentials) {
+                    setAiCoreCredentials(config.aiCoreCredentials);
+                }
+                setAiCoreSaved(true);
             }
         } catch (error) {
             console.error('Failed to fetch config:', error);
@@ -173,6 +200,74 @@ export function SettingsMenu({ isOpen, onClose }: SettingsMenuProps) {
     const handleSupervisorPromptChange = (value: string) => {
         setSupervisorSystemPrompt(value);
         setSupervisorPromptSaved(false);
+    };
+
+    const handleAiCoreChange = (field: keyof AICoreCredentials, value: string | number) => {
+        setAiCoreCredentials(prev => ({ ...prev, [field]: value }));
+        setAiCoreSaved(false);
+        setAiCoreTestStatus('idle');
+    };
+
+    const saveAiCoreCredentials = async () => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ aiCoreCredentials })
+            });
+            if (response.ok) {
+                setAiCoreSaved(true);
+            }
+        } catch (error) {
+            console.error('Failed to save AI Core credentials:', error);
+        }
+    };
+
+    const testAiCoreCredentials = async () => {
+        setAiCoreTestStatus('testing');
+        setAiCoreTestMessage('Testing credentials...');
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/aicore/test`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(aiCoreCredentials)
+            });
+            const result = await response.json();
+            if (response.ok && result.success) {
+                setAiCoreTestStatus('success');
+                setAiCoreTestMessage(result.message || 'Connection successful!');
+            } else {
+                setAiCoreTestStatus('error');
+                setAiCoreTestMessage(result.error || 'Connection failed');
+            }
+        } catch (error) {
+            setAiCoreTestStatus('error');
+            setAiCoreTestMessage('Failed to test credentials');
+        }
+    };
+
+    const clearAiCoreCredentials = async () => {
+        const emptyCredentials: AICoreCredentials = {
+            clientId: '',
+            clientSecret: '',
+            authUrl: '',
+            baseUrl: '',
+            resourceGroup: 'default',
+            timeoutMs: 120000
+        };
+        setAiCoreCredentials(emptyCredentials);
+        try {
+            await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ aiCoreCredentials: undefined })
+            });
+            setAiCoreSaved(true);
+            setAiCoreTestStatus('idle');
+            setAiCoreTestMessage('');
+        } catch (error) {
+            console.error('Failed to clear AI Core credentials:', error);
+        }
     };
 
     const saveAutoFocusOnInput = async (value: boolean) => {
@@ -486,6 +581,132 @@ export function SettingsMenu({ isOpen, onClose }: SettingsMenuProps) {
                                     </div>
                                 </>
                             )}
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
+                        title="SAP AI Core"
+                        icon={<Cloud size={18} />}
+                        isExpanded={expandedPanels.aicore}
+                        onToggle={() => togglePanel('aicore')}
+                    >
+                        <div className="aicore-content">
+                            <p className="aicore-description">
+                                Configure SAP AI Core credentials for the embedded Anthropic proxy.
+                                This enables Claude models through your SAP AI Core deployment.
+                            </p>
+
+                            <div className="aicore-form">
+                                <div className="aicore-field">
+                                    <label>Client ID</label>
+                                    <input
+                                        type="text"
+                                        value={aiCoreCredentials.clientId}
+                                        onChange={(e) => handleAiCoreChange('clientId', e.target.value)}
+                                        placeholder="sb-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx!..."
+                                        className="aicore-input"
+                                    />
+                                </div>
+
+                                <div className="aicore-field">
+                                    <label>Client Secret</label>
+                                    <input
+                                        type="password"
+                                        value={aiCoreCredentials.clientSecret}
+                                        onChange={(e) => handleAiCoreChange('clientSecret', e.target.value)}
+                                        placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx$..."
+                                        className="aicore-input"
+                                    />
+                                </div>
+
+                                <div className="aicore-field">
+                                    <label>Auth URL</label>
+                                    <input
+                                        type="text"
+                                        value={aiCoreCredentials.authUrl}
+                                        onChange={(e) => handleAiCoreChange('authUrl', e.target.value)}
+                                        placeholder="https://xxx.authentication.sap.hana.ondemand.com"
+                                        className="aicore-input"
+                                    />
+                                </div>
+
+                                <div className="aicore-field">
+                                    <label>Base URL</label>
+                                    <input
+                                        type="text"
+                                        value={aiCoreCredentials.baseUrl}
+                                        onChange={(e) => handleAiCoreChange('baseUrl', e.target.value)}
+                                        placeholder="https://api.ai.xxx.aws.ml.hana.ondemand.com"
+                                        className="aicore-input"
+                                    />
+                                </div>
+
+                                <div className="aicore-row">
+                                    <div className="aicore-field aicore-field-half">
+                                        <label>Resource Group</label>
+                                        <input
+                                            type="text"
+                                            value={aiCoreCredentials.resourceGroup}
+                                            onChange={(e) => handleAiCoreChange('resourceGroup', e.target.value)}
+                                            placeholder="default"
+                                            className="aicore-input"
+                                        />
+                                    </div>
+
+                                    <div className="aicore-field aicore-field-half">
+                                        <label>Timeout (ms)</label>
+                                        <input
+                                            type="number"
+                                            value={aiCoreCredentials.timeoutMs}
+                                            onChange={(e) => handleAiCoreChange('timeoutMs', parseInt(e.target.value) || 120000)}
+                                            placeholder="120000"
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            {aiCoreTestStatus !== 'idle' && (
+                                <div className={`aicore-test-result ${aiCoreTestStatus}`}>
+                                    {aiCoreTestStatus === 'testing' && <Loader2 size={16} className="spinning" />}
+                                    {aiCoreTestStatus === 'success' && <CheckCircle size={16} />}
+                                    {aiCoreTestStatus === 'error' && <AlertCircle size={16} />}
+                                    <span>{aiCoreTestMessage}</span>
+                                </div>
+                            )}
+
+                            <div className="aicore-actions">
+                                <span className={`aicore-status ${aiCoreSaved ? 'saved' : 'unsaved'}`}>
+                                    {aiCoreSaved ? 'Saved' : 'Unsaved changes'}
+                                </span>
+                                <div className="aicore-buttons">
+                                    <button
+                                        className="aicore-clear-btn"
+                                        onClick={clearAiCoreCredentials}
+                                        disabled={!aiCoreCredentials.clientId && !aiCoreCredentials.clientSecret}
+                                    >
+                                        Clear
+                                    </button>
+                                    <button
+                                        className="aicore-test-btn"
+                                        onClick={testAiCoreCredentials}
+                                        disabled={!aiCoreCredentials.clientId || !aiCoreCredentials.clientSecret || aiCoreTestStatus === 'testing'}
+                                    >
+                                        {aiCoreTestStatus === 'testing' ? 'Testing...' : 'Test Connection'}
+                                    </button>
+                                    <button
+                                        className="aicore-save-btn"
+                                        onClick={saveAiCoreCredentials}
+                                        disabled={aiCoreSaved}
+                                    >
+                                        Save
+                                    </button>
+                                </div>
+                            </div>
+
+                            <p className="aicore-note">
+                                Note: The server must be restarted after changing credentials for the proxy to use them.
+                            </p>
                         </div>
                     </CollapsiblePanel>
 

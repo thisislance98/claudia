@@ -25,6 +25,7 @@ interface PersistedTask {
     outputHistory?: string;
     gitState?: TaskGitState;
     wasInterrupted?: boolean;  // True if task was busy when backend shut down
+    systemPrompt?: string;     // Custom system prompt for this task
 }
 
 interface TaskPersistence {
@@ -41,6 +42,7 @@ interface InternalTask extends Task {
     sessionId: string | null;
     promptSubmitAttempts?: number;
     gitStateBefore?: Partial<TaskGitState>;
+    systemPrompt?: string;
 }
 
 /**
@@ -148,6 +150,7 @@ export class TaskSpawner extends EventEmitter {
                     sessionId: task.sessionId,
                     outputHistory: historyBase64,
                     wasInterrupted,
+                    systemPrompt: task.systemPrompt,
                 });
             }
 
@@ -512,7 +515,7 @@ export class TaskSpawner extends EventEmitter {
         return JSON.stringify(settings);
     }
 
-    async createTask(prompt: string, workspaceId: string): Promise<Task> {
+    async createTask(prompt: string, workspaceId: string, systemPrompt?: string): Promise<Task> {
         const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
         const gitStateBefore = await captureGitStateBefore(workspaceId);
@@ -530,6 +533,12 @@ export class TaskSpawner extends EventEmitter {
         if (this.configStore?.getSkipPermissions()) {
             claudeArgs.push('--dangerously-skip-permissions');
             console.log(`[TaskSpawner] Skip permissions enabled`);
+        }
+
+        // Add custom system prompt if provided
+        if (systemPrompt && systemPrompt.trim()) {
+            claudeArgs.push('--system-prompt', systemPrompt.trim());
+            console.log(`[TaskSpawner] Using custom system prompt`);
         }
 
         console.log(`[TaskSpawner] Creating task ${id} in ${workspaceId}`);
@@ -558,6 +567,7 @@ export class TaskSpawner extends EventEmitter {
             pendingPrompt: prompt,
             sessionId: null,
             gitStateBefore: gitStateBefore || undefined,
+            systemPrompt: systemPrompt?.trim() || undefined,
         };
 
         this.setupProcessHandlers(task);
@@ -644,6 +654,7 @@ export class TaskSpawner extends EventEmitter {
             createdAt: task.createdAt,
             gitState: task.gitState,
             waitingInputType: task.waitingInputType,
+            systemPrompt: task.systemPrompt,
         };
     }
 
@@ -796,6 +807,32 @@ export class TaskSpawner extends EventEmitter {
             this.disconnectedTasks.delete(taskId);
             this.scheduleSave();
             this.emit('taskDestroyed', taskId);
+        }
+    }
+
+    archiveTask(taskId: string): void {
+        // Archive removes task from active list but keeps it in persistent storage
+        // For now, it behaves the same as destroy - just removes the task
+        // TODO: In the future, could move to an archived state instead of deleting
+        const task = this.tasks.get(taskId);
+        if (task) {
+            try {
+                task.process.kill();
+            } catch (_e) {
+                // Process might already be dead
+            }
+            this.tasks.delete(taskId);
+            this.scheduleSave();
+            this.emit('taskDestroyed', taskId);
+            console.log(`[TaskSpawner] Archived (destroyed) task ${taskId}`);
+            return;
+        }
+
+        if (this.disconnectedTasks.has(taskId)) {
+            this.disconnectedTasks.delete(taskId);
+            this.scheduleSave();
+            this.emit('taskDestroyed', taskId);
+            console.log(`[TaskSpawner] Archived (destroyed) disconnected task ${taskId}`);
         }
     }
 

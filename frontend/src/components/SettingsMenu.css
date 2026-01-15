@@ -757,3 +757,188 @@
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* AI Core Panel Styles */
+.aicore-content {
+    padding: 16px 20px;
+}
+
+.aicore-description {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin: 0 0 16px 0;
+    line-height: 1.4;
+}
+
+.aicore-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.aicore-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.aicore-field label {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.aicore-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    outline: none;
+    transition: border-color 0.2s ease;
+}
+
+.aicore-input:focus {
+    border-color: var(--accent-secondary);
+}
+
+.aicore-input::placeholder {
+    color: var(--text-muted);
+}
+
+.aicore-row {
+    display: flex;
+    gap: 12px;
+}
+
+.aicore-field-half {
+    flex: 1;
+}
+
+.aicore-test-result {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    margin-top: 12px;
+}
+
+.aicore-test-result.testing {
+    background: rgba(139, 148, 158, 0.1);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+}
+
+.aicore-test-result.success {
+    background: rgba(63, 185, 80, 0.1);
+    border: 1px solid rgba(63, 185, 80, 0.3);
+    color: var(--accent-green);
+}
+
+.aicore-test-result.error {
+    background: rgba(248, 81, 73, 0.1);
+    border: 1px solid rgba(248, 81, 73, 0.3);
+    color: var(--accent-red);
+}
+
+.aicore-test-result .spinning {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.aicore-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.aicore-status {
+    font-size: 0.75rem;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.aicore-status.saved {
+    color: var(--accent-green);
+    background: rgba(63, 185, 80, 0.1);
+}
+
+.aicore-status.unsaved {
+    color: var(--accent-yellow);
+    background: rgba(255, 193, 7, 0.1);
+}
+
+.aicore-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.aicore-clear-btn,
+.aicore-test-btn,
+.aicore-save-btn {
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.aicore-clear-btn {
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+}
+
+.aicore-clear-btn:hover:not(:disabled) {
+    background: rgba(248, 81, 73, 0.1);
+    border-color: var(--accent-red);
+    color: var(--accent-red);
+}
+
+.aicore-test-btn {
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+}
+
+.aicore-test-btn:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    border-color: var(--accent-secondary);
+    color: var(--accent-secondary);
+}
+
+.aicore-save-btn {
+    background: var(--accent-secondary);
+    border: 1px solid var(--accent-secondary);
+    color: var(--bg-primary);
+}
+
+.aicore-save-btn:hover:not(:disabled) {
+    filter: brightness(1.1);
+}
+
+.aicore-clear-btn:disabled,
+.aicore-test-btn:disabled,
+.aicore-save-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.aicore-note {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin: 12px 0 0 0;
+    font-style: italic;
+}

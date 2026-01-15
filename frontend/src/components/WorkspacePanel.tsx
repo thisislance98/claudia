@@ -33,11 +33,10 @@ function playNotificationSound() {
 interface StateIconProps {
     task: Task;
     hasActiveQuestion: boolean;
-    lastSegmentHasQuestion: boolean;
     onArchive?: () => void;
 }
 
-function StateIcon({ task, hasActiveQuestion, lastSegmentHasQuestion, onArchive }: StateIconProps) {
+function StateIcon({ task, hasActiveQuestion, onArchive }: StateIconProps) {
     if (task.state === 'busy') {
         return <Loader2 className="status-icon spinning" size={14} />;
     }
@@ -46,25 +45,28 @@ function StateIcon({ task, hasActiveQuestion, lastSegmentHasQuestion, onArchive 
         return <AlertCircle className="status-icon interrupted" size={14} />;
     }
 
-    if (task.state === 'waiting_input' && hasActiveQuestion) {
+    // Show "!" if waiting for input OR if there's an active question from backend
+    if (task.state === 'waiting_input' || hasActiveQuestion) {
         return <span className="status-icon question-icon">!</span>;
     }
 
-    if (task.state === 'idle' || task.state === 'waiting_input') {
-        // Show "!" if the last segment of the prompt is a question, otherwise empty checkbox
-        if (lastSegmentHasQuestion) {
-            return <span className="status-icon question-icon">!</span>;
-        }
-        // Empty checkbox that archives task when clicked
+    if (task.state === 'idle') {
+        // Task is idle and not asking questions - show checkbox to archive
         return (
-            <Square
-                className="status-icon idle archive-checkbox"
-                size={14}
+            <button
+                className="archive-checkbox-btn"
                 onClick={(e) => {
                     e.stopPropagation();
+                    e.preventDefault();
                     onArchive?.();
                 }}
-            />
+                title="Archive task"
+            >
+                <Square
+                    className="status-icon idle archive-checkbox"
+                    size={14}
+                />
+            </button>
         );
     }
 
@@ -82,32 +84,42 @@ interface TaskItemProps {
 }
 
 function TaskItem({ task, onDeleteTask, onInterruptTask, onArchiveTask, onSelectTask, isSelected, hasActiveQuestion }: TaskItemProps) {
+    const [stopClicked, setStopClicked] = useState(false);
+
+    // Reset stopClicked when task state changes from busy
+    useEffect(() => {
+        if (task.state !== 'busy') {
+            setStopClicked(false);
+        }
+    }, [task.state]);
+
     // Split prompt by ⏺ dots and get the last segment for display
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
     const lastSegment = segments.length > 0 ? segments[segments.length - 1] : task.prompt;
-
-    // Check if last segment ends with a question mark
-    const lastSegmentHasQuestion = lastSegment.endsWith('?');
 
     // Truncate for display
     const displayPrompt = lastSegment.length > 50
         ? lastSegment.substring(0, 50) + '...'
         : lastSegment;
 
-    const canInterrupt = task.state === 'busy';
+    const canInterrupt = task.state === 'busy' && !stopClicked;
 
     return (
         <div
             className={`task-item ${isSelected ? 'selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''}`}
             onClick={() => onSelectTask(task.id)}
         >
-            <StateIcon task={task} hasActiveQuestion={hasActiveQuestion} lastSegmentHasQuestion={lastSegmentHasQuestion} onArchive={() => onArchiveTask(task.id)} />
+            <StateIcon task={task} hasActiveQuestion={hasActiveQuestion} onArchive={() => onArchiveTask(task.id)} />
             <span className="task-prompt" title={task.prompt}>{displayPrompt}</span>
             <div className="task-actions">
                 {canInterrupt && (
                     <button
                         className="task-action-button stop"
-                        onClick={(e) => { e.stopPropagation(); onInterruptTask(task.id); }}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            setStopClicked(true);
+                            onInterruptTask(task.id);
+                        }}
                         title="Stop task"
                     >
                         <StopCircle size={12} />
@@ -137,7 +149,7 @@ interface WorkspaceSectionProps {
     onArchiveTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
     onDeleteWorkspace: () => void;
-    onCreateTask: (prompt: string) => void;
+    onCreateTask: (prompt: string, systemPrompt?: string) => void;
 }
 
 function WorkspaceSection({
@@ -156,6 +168,8 @@ function WorkspaceSection({
 }: WorkspaceSectionProps) {
     const [inputValue, setInputValue] = useState('');
     const [interimTranscript, setInterimTranscript] = useState('');
+    const [systemPrompt, setSystemPrompt] = useState('');
+    const [showAdvanced, setShowAdvanced] = useState(false);
     const voiceInputRef = useRef<VoiceInputHandle>(null);
 
     const handleSubmit = (e: React.FormEvent) => {
@@ -163,9 +177,11 @@ function WorkspaceSection({
         // Stop voice recording when submitting
         voiceInputRef.current?.stopListening();
         if (inputValue.trim()) {
-            onCreateTask(inputValue.trim());
+            onCreateTask(inputValue.trim(), systemPrompt.trim() || undefined);
             setInputValue('');
             setInterimTranscript('');
+            setSystemPrompt('');
+            setShowAdvanced(false);
         }
     };
 
@@ -225,35 +241,57 @@ function WorkspaceSection({
                         </div>
                     )}
                     <form className="task-input-form" onSubmit={handleSubmit}>
-                        <div className="task-input-wrapper">
-                            <input
-                                type="text"
-                                className="task-input"
-                                placeholder="Type or speak a task..."
-                                value={inputValue + (interimTranscript ? (inputValue ? ' ' : '') + interimTranscript : '')}
-                                onChange={(e) => {
-                                    setInputValue(e.target.value);
-                                    setInterimTranscript('');
-                                }}
-                                onKeyDown={handleKeyDown}
+                        <div className="task-input-row">
+                            <div className="task-input-wrapper">
+                                <input
+                                    type="text"
+                                    className="task-input"
+                                    placeholder="Type or speak a task..."
+                                    value={inputValue + (interimTranscript ? (inputValue ? ' ' : '') + interimTranscript : '')}
+                                    onChange={(e) => {
+                                        setInputValue(e.target.value);
+                                        setInterimTranscript('');
+                                    }}
+                                    onKeyDown={handleKeyDown}
+                                />
+                                {interimTranscript && (
+                                    <span className="interim-indicator">listening...</span>
+                                )}
+                            </div>
+                            <VoiceInput
+                                ref={voiceInputRef}
+                                onTranscript={handleVoiceTranscript}
+                                className="task-voice-button"
+                                continuous={true}
                             />
-                            {interimTranscript && (
-                                <span className="interim-indicator">listening...</span>
-                            )}
+                            <button
+                                type="submit"
+                                className="task-submit-button"
+                                disabled={!inputValue.trim() && !interimTranscript.trim()}
+                            >
+                                <Send size={16} />
+                            </button>
                         </div>
-                        <VoiceInput
-                            ref={voiceInputRef}
-                            onTranscript={handleVoiceTranscript}
-                            className="task-voice-button"
-                            continuous={true}
-                        />
                         <button
-                            type="submit"
-                            className="task-submit-button"
-                            disabled={!inputValue.trim() && !interimTranscript.trim()}
+                            type="button"
+                            className="advanced-toggle"
+                            onClick={() => setShowAdvanced(!showAdvanced)}
                         >
-                            <Send size={16} />
+                            {showAdvanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                            <span>System Prompt</span>
+                            {systemPrompt && <span className="system-prompt-indicator">*</span>}
                         </button>
+                        {showAdvanced && (
+                            <div className="system-prompt-section">
+                                <textarea
+                                    className="system-prompt-input"
+                                    placeholder="Custom instructions for this task..."
+                                    value={systemPrompt}
+                                    onChange={(e) => setSystemPrompt(e.target.value)}
+                                    rows={3}
+                                />
+                            </div>
+                        )}
                     </form>
                 </div>
             )}
@@ -267,12 +305,13 @@ interface WorkspacePanelProps {
     onArchiveTask: (taskId: string) => void;
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
-    onCreateTask: (prompt: string, workspaceId: string) => void;
+    onCreateTask: (prompt: string, workspaceId: string, systemPrompt?: string) => void;
     onSelectTask: (taskId: string) => void;
 }
 
 export function WorkspacePanel({
     onDeleteTask,
+    onInterruptTask,
     onArchiveTask,
     onDeleteWorkspace,
     onCreateTask,
@@ -356,11 +395,11 @@ export function WorkspacePanel({
                             isExpanded={expandedWorkspaces.has(workspace.id)}
                             onToggleExpand={() => toggleWorkspaceExpanded(workspace.id)}
                             onDeleteTask={onDeleteTask}
-                            onInterruptTask={() => {}} // TODO: wire up interrupt
+                            onInterruptTask={onInterruptTask}
                             onArchiveTask={onArchiveTask}
                             onSelectTask={onSelectTask}
                             onDeleteWorkspace={() => onDeleteWorkspace(workspace.id)}
-                            onCreateTask={(prompt) => onCreateTask(prompt, workspace.id)}
+                            onCreateTask={(prompt, systemPrompt) => onCreateTask(prompt, workspace.id, systemPrompt)}
                         />
                     ))
                 )}

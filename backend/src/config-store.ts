@@ -16,6 +16,15 @@ export interface MCPServerConfig {
     enabled: boolean;
 }
 
+export interface AICoreCredentials {
+    clientId: string;
+    clientSecret: string;
+    authUrl: string;
+    baseUrl: string;
+    resourceGroup: string;
+    timeoutMs: number;
+}
+
 export interface AppConfig {
     mcpServers: MCPServerConfig[];
     skipPermissions: boolean;
@@ -23,6 +32,7 @@ export interface AppConfig {
     supervisorEnabled: boolean;
     supervisorSystemPrompt: string;
     autoFocusOnInput: boolean;  // Auto-switch to task when it needs input
+    aiCoreCredentials?: AICoreCredentials;  // SAP AI Core credentials for Anthropic proxy
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are an AI supervisor monitoring coding tasks. Your job is to:
@@ -74,7 +84,8 @@ export class ConfigStore {
                     rules: loaded.rules ?? '',
                     supervisorEnabled: loaded.supervisorEnabled ?? false,
                     supervisorSystemPrompt: loaded.supervisorSystemPrompt ?? DEFAULT_SUPERVISOR_PROMPT,
-                    autoFocusOnInput: loaded.autoFocusOnInput ?? false
+                    autoFocusOnInput: loaded.autoFocusOnInput ?? false,
+                    aiCoreCredentials: loaded.aiCoreCredentials
                 };
             }
         } catch (error) {
@@ -116,8 +127,20 @@ export class ConfigStore {
         if (updates.autoFocusOnInput !== undefined) {
             this.config.autoFocusOnInput = updates.autoFocusOnInput;
         }
+        if (updates.aiCoreCredentials !== undefined) {
+            this.config.aiCoreCredentials = updates.aiCoreCredentials;
+        }
         this.saveConfig();
         return this.getConfig();
+    }
+
+    getAICoreCredentials(): AICoreCredentials | undefined {
+        return this.config.aiCoreCredentials;
+    }
+
+    setAICoreCredentials(credentials: AICoreCredentials | undefined): void {
+        this.config.aiCoreCredentials = credentials;
+        this.saveConfig();
     }
 
     isSupervisorEnabled(): boolean {

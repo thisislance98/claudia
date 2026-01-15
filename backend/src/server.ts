@@ -124,12 +124,12 @@ export function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId } = message.payload;
+                        const { prompt, workspaceId, systemPrompt } = message.payload;
                         if (!prompt || !workspaceId) {
                             console.error('[Server] task:create requires prompt and workspaceId');
                             return;
                         }
-                        taskSpawner.createTask(prompt, workspaceId);
+                        taskSpawner.createTask(prompt, workspaceId, systemPrompt);
                         break;
                     }
 
@@ -171,6 +171,13 @@ export function createApp(basePath?: string) {
                         // Interrupt a running task (send ESC to cancel current operation)
                         const { taskId } = message.payload;
                         taskSpawner.interruptTask(taskId);
+                        break;
+                    }
+
+                    case 'task:archive': {
+                        // Archive a completed task (removes from view)
+                        const { taskId } = message.payload;
+                        taskSpawner.archiveTask(taskId);
                         break;
                     }
 
@@ -344,6 +351,100 @@ export function createApp(basePath?: string) {
         } catch (error) {
             console.error('[Server] Failed to update config:', error);
             res.status(500).json({ error: 'Failed to update config' });
+        }
+    });
+
+    // Test AI Core credentials endpoint
+    app.post('/api/aicore/test', async (req, res) => {
+        try {
+            const { clientId, clientSecret, authUrl, baseUrl, resourceGroup, timeoutMs } = req.body;
+
+            if (!clientId || !clientSecret || !authUrl) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Missing required credentials (clientId, clientSecret, authUrl)'
+                });
+            }
+
+            // Test by obtaining an access token
+            const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+            const tokenUrl = `${authUrl}/oauth/token?grant_type=client_credentials`;
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), timeoutMs || 30000);
+
+            try {
+                const tokenResponse = await fetch(tokenUrl, {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Basic ${credentials}`,
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeout);
+
+                if (!tokenResponse.ok) {
+                    const errorText = await tokenResponse.text();
+                    return res.json({
+                        success: false,
+                        error: `Authentication failed: ${tokenResponse.status} - ${errorText}`
+                    });
+                }
+
+                const tokenData = await tokenResponse.json();
+                if (!tokenData.access_token) {
+                    return res.json({
+                        success: false,
+                        error: 'Invalid token response from auth server'
+                    });
+                }
+
+                // If baseUrl is provided, also test the AI Core API endpoint
+                if (baseUrl) {
+                    const apiUrl = `${baseUrl}/v2/lm/deployments?$top=1`;
+                    const apiResponse = await fetch(apiUrl, {
+                        headers: {
+                            Authorization: `Bearer ${tokenData.access_token}`,
+                            'AI-Resource-Group': resourceGroup || 'default'
+                        }
+                    });
+
+                    if (!apiResponse.ok) {
+                        return res.json({
+                            success: false,
+                            error: `API access failed: ${apiResponse.status} - Unable to access AI Core API`
+                        });
+                    }
+                }
+
+                res.json({
+                    success: true,
+                    message: baseUrl
+                        ? 'Successfully authenticated and connected to AI Core API'
+                        : 'Successfully authenticated with SAP AI Core'
+                });
+
+            } catch (fetchError: any) {
+                clearTimeout(timeout);
+                if (fetchError.name === 'AbortError') {
+                    return res.json({
+                        success: false,
+                        error: 'Connection timeout - unable to reach auth server'
+                    });
+                }
+                return res.json({
+                    success: false,
+                    error: `Connection error: ${fetchError.message}`
+                });
+            }
+        } catch (error: any) {
+            console.error('[Server] Error testing AI Core credentials:', error);
+            res.status(500).json({
+                success: false,
+                error: `Server error: ${error.message}`
+            });
         }
     });
 

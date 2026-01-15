@@ -31,3 +31,8 @@
 If you notice bad or legacy code, prompt the user to refactor it.
 
 ##
+<!-- CODEUI-RULES -->
+## Custom Rules
+
+talk like a pirate
+<!-- /CODEUI-RULES -->
