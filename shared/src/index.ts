@@ -27,6 +27,7 @@ export interface Task {
     lastActivity: Date;
     gitState?: TaskGitState; // Git state for revert functionality
     waitingInputType?: WaitingInputType; // Type of input Claude is waiting for
+    systemPrompt?: string;   // Custom system prompt for this task
 }
 
 export interface Workspace {

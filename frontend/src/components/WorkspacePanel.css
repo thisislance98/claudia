@@ -307,7 +307,7 @@
 
 .workspace-panel .task-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 6px;
     padding: 6px 8px;
     cursor: pointer;
@@ -318,9 +318,8 @@
 
 .workspace-panel .task-item .task-prompt {
     flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.3;
+    word-break: break-word;
 }
 
 .workspace-panel .task-item .task-actions {

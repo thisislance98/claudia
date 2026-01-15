@@ -396,12 +396,23 @@ export function createApp(basePath?: string) {
                 }
             }
         }
-        // Add aiCoreConfigured flag based on env vars (takes precedence over config file)
+        // Add aiCoreConfigured flag and populate from env vars if not in config
         const aiCoreConfiguredFromEnv = !!(
             process.env.SAP_AICORE_CLIENT_ID &&
             process.env.SAP_AICORE_CLIENT_SECRET
         );
-        res.json({ ...config, aiCoreConfiguredFromEnv });
+        // If no credentials in config but have env vars, populate from env
+        const aiCoreCredentials = config.aiCoreCredentials?.clientId
+            ? config.aiCoreCredentials
+            : (aiCoreConfiguredFromEnv ? {
+                clientId: process.env.SAP_AICORE_CLIENT_ID || '',
+                clientSecret: process.env.SAP_AICORE_CLIENT_SECRET || '',
+                authUrl: process.env.SAP_AICORE_AUTH_URL || '',
+                baseUrl: process.env.SAP_AICORE_BASE_URL || '',
+                resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
+                timeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
+            } : undefined);
+        res.json({ ...config, aiCoreCredentials, aiCoreConfiguredFromEnv });
     });
 
     app.put('/api/config', (req, res) => {
@@ -424,6 +435,60 @@ export function createApp(basePath?: string) {
         } catch (error) {
             console.error('[Server] Failed to update config:', error);
             res.status(500).json({ error: 'Failed to update config' });
+        }
+    });
+
+    // Get Claude Code's global MCP servers from ~/.claude.json
+    app.get('/api/claude-mcp-servers', (req, res) => {
+        try {
+            const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+            const claudeConfigPath = join(homeDir, '.claude.json');
+
+            if (!existsSync(claudeConfigPath)) {
+                return res.json({ global: [], project: [] });
+            }
+
+            const claudeConfig = JSON.parse(readFileSync(claudeConfigPath, 'utf-8'));
+            const workspacePath = req.query.workspace as string;
+
+            // Extract global MCP servers
+            const globalServers: { name: string; command: string; args?: string[]; scope: 'global' }[] = [];
+            if (claudeConfig.mcpServers) {
+                for (const [name, config] of Object.entries(claudeConfig.mcpServers as Record<string, any>)) {
+                    globalServers.push({
+                        name,
+                        command: config.command || '',
+                        args: config.args || [],
+                        scope: 'global'
+                    });
+                }
+            }
+
+            // Extract project-specific MCP servers if workspace path provided
+            const projectServers: { name: string; command: string; args?: string[]; scope: 'project'; projectPath: string }[] = [];
+            if (claudeConfig.projects) {
+                for (const [projectPath, projectConfig] of Object.entries(claudeConfig.projects as Record<string, any>)) {
+                    if (projectConfig.mcpServers) {
+                        for (const [name, config] of Object.entries(projectConfig.mcpServers as Record<string, any>)) {
+                            // Include if no workspace filter, or if this project matches the workspace
+                            if (!workspacePath || projectPath === workspacePath || workspacePath.startsWith(projectPath)) {
+                                projectServers.push({
+                                    name,
+                                    command: config.command || '',
+                                    args: config.args || [],
+                                    scope: 'project',
+                                    projectPath
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            res.json({ global: globalServers, project: projectServers });
+        } catch (error) {
+            console.error('[Server] Failed to read Claude MCP servers:', error);
+            res.status(500).json({ error: 'Failed to read Claude MCP servers' });
         }
     });
 

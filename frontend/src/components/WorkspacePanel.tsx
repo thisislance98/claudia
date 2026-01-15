@@ -97,9 +97,9 @@ function TaskItem({ task, onDeleteTask, onInterruptTask, onArchiveTask, onSelect
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
     const lastSegment = segments.length > 0 ? segments[segments.length - 1] : task.prompt;
 
-    // Truncate for display
-    const displayPrompt = lastSegment.length > 50
-        ? lastSegment.substring(0, 50) + '...'
+    // Truncate for display - max ~80 chars to fit UI well
+    const displayPrompt = lastSegment.length > 80
+        ? lastSegment.substring(0, 80) + '...'
         : lastSegment;
 
     const canInterrupt = task.state === 'busy' && !stopClicked;

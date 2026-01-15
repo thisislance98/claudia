@@ -64,14 +64,8 @@ done
 echo "✅ Ports are free"
 echo ""
 echo "🔮 Starting Claudia..."
-echo "   Backend: http://localhost:$BACKEND_PORT (auto-reloads on file changes)"
-echo "   Frontend: http://localhost:$FRONTEND_PORT (auto-reloads on file changes)"
-echo ""
-echo "💡 Multi-Instance Development:"
-echo "   - Backend uses tsx watch (auto-reloads on save)"
-echo "   - Frontend uses Vite HMR (instant updates)"
-echo "   - Multiple Claude Code instances can work simultaneously"
-echo "   - No manual restarts needed!"
+echo "   Backend: http://localhost:$BACKEND_PORT"
+echo "   Frontend: http://localhost:$FRONTEND_PORT"
 echo ""
 
 # Start from project root

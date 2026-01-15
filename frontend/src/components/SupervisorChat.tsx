@@ -155,7 +155,7 @@ export function SupervisorChat({
         }
     };
 
-    const truncatePrompt = (prompt: string, maxLength: number = 100) => {
+    const truncatePrompt = (prompt: string, maxLength: number = 80) => {
         if (prompt.length <= maxLength) return prompt;
         return prompt.substring(0, maxLength) + '...';
     };

@@ -21,8 +21,9 @@ console.log(`Claude Code CLI detected: ${claudeCheck.version}`);
 const { server, taskSpawner } = createApp();
 
 console.log(`[Index] Starting server on port ${PORT}...`);
+let httpServer: ReturnType<typeof server.listen> | undefined;
 try {
-    const httpServer = server.listen(PORT, () => {
+    httpServer = server.listen(PORT, () => {
         console.log(`Claude Code UI running on http://localhost:${PORT}`);
         console.log(`WebSocket available at ws://localhost:${PORT}`);
         console.log(`[Index] Server successfully listening`);
@@ -42,7 +43,7 @@ try {
 const shutdown = (signal: string) => {
     console.log(`\n[${signal}] Shutting down...`);
 
-    httpServer.close(() => {
+    httpServer?.close(() => {
         console.log('HTTP server closed');
     });
 
