@@ -593,7 +593,7 @@
 
 .task-input-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
 }
 
@@ -608,6 +608,10 @@
     font-size: 0.875rem;
     outline: none;
     transition: all 0.2s ease;
+    resize: none;
+    font-family: inherit;
+    line-height: 1.4;
+    min-height: 60px;
 }
 
 .task-input:focus {
@@ -749,58 +753,3 @@
     color: var(--text-secondary);
 }
 
-/* Advanced Toggle for System Prompt */
-.advanced-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 8px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 0.75rem;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    align-self: flex-start;
-}
-
-.advanced-toggle:hover {
-    color: var(--text-secondary);
-    background: var(--bg-tertiary);
-}
-
-.advanced-toggle .system-prompt-indicator {
-    color: var(--accent-secondary);
-    font-weight: bold;
-    margin-left: 4px;
-}
-
-/* System Prompt Section */
-.system-prompt-section {
-    width: 100%;
-}
-
-.system-prompt-input {
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    font-size: 0.8125rem;
-    font-family: inherit;
-    outline: none;
-    resize: vertical;
-    min-height: 60px;
-    transition: all 0.2s ease;
-}
-
-.system-prompt-input:focus {
-    border-color: var(--accent-secondary);
-    box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1);
-}
-
-.system-prompt-input::placeholder {
-    color: var(--text-muted);
-}

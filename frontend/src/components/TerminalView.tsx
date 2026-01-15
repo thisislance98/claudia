@@ -134,25 +134,40 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
 
+        // Helper to safely fit terminal
+        const fitTerminal = () => {
+            if (!fitAddonRef.current || !terminalRef.current || !xtermRef.current) return;
+
+            // Check if container has valid dimensions
+            if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) {
+                return;
+            }
+
+            try {
+                fitAddonRef.current.fit();
+            } catch (err) {
+                console.warn('Failed to fit terminal:', err);
+            }
+        };
+
         // Initial fit with a small delay to ensure container has dimensions
         requestAnimationFrame(() => {
-            fitAddon.fit();
-            term.focus();
+            fitTerminal();
+            // check if terminal is still valid before focusing
+            if (xtermRef.current) {
+                xtermRef.current.focus();
+            }
         });
 
         // Use ResizeObserver to detect container size changes (more reliable than window resize)
         const resizeObserver = new ResizeObserver(() => {
-            if (fitAddonRef.current) {
-                fitAddonRef.current.fit();
-            }
+            fitTerminal();
         });
         resizeObserver.observe(terminalRef.current);
 
         // Also handle window resize as fallback
         const handleResize = () => {
-            if (fitAddonRef.current) {
-                fitAddonRef.current.fit();
-            }
+            fitTerminal();
         };
         window.addEventListener('resize', handleResize);
 
@@ -208,16 +223,30 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
 
     // Refit on task change
     useEffect(() => {
-        if (fitAddonRef.current) {
-            setTimeout(() => fitAddonRef.current?.fit(), 0);
+        if (fitAddonRef.current && terminalRef.current) {
+            // Check if container has valid dimensions
+            if (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
+                try {
+                    // Use a small timeout to let layout settle
+                    setTimeout(() => {
+                        try {
+                            fitAddonRef.current?.fit();
+                        } catch (e) {
+                            // Ignore fit errors during task switch
+                        }
+                    }, 0);
+                } catch (e) {
+                    // Ignore immediate fit errors
+                }
+            }
         }
     }, [task]);
 
-    // Handle Resume button click - sends task:restore message
+    // Handle Resume button click - sends task:reconnect message to spawn new Claude process
     const handleResume = () => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({
-                type: 'task:restore',
+                type: 'task:reconnect',
                 payload: { taskId: task.id }
             }));
         }

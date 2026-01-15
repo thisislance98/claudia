@@ -7,6 +7,7 @@ import './SettingsMenu.css';
 interface SettingsMenuProps {
     isOpen: boolean;
     onClose: () => void;
+    initialPanel?: string;
 }
 
 interface MCPServer {
@@ -53,7 +54,7 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
     );
 }
 
-export function SettingsMenu({ isOpen, onClose }: SettingsMenuProps) {
+export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         sound: false,
         behavior: false,
@@ -63,6 +64,13 @@ export function SettingsMenu({ isOpen, onClose }: SettingsMenuProps) {
         supervisor: false,
         aicore: false
     });
+
+    // Handle initial panel expansion when settings opens
+    useEffect(() => {
+        if (isOpen && initialPanel) {
+            setExpandedPanels(prev => ({ ...prev, [initialPanel]: true }));
+        }
+    }, [isOpen, initialPanel]);
 
     const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
     const [isAddingServer, setIsAddingServer] = useState(false);

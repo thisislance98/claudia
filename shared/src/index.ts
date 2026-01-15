@@ -1,5 +1,8 @@
 // Simplified type definitions for task-based Claude Code spawner
 
+// Export shared configuration  
+export * from './config.js';
+
 export type TaskState = 'idle' | 'busy' | 'waiting_input' | 'exited' | 'disconnected' | 'interrupted' | 'archived';
 
 // Types of input Claude Code might be waiting for
@@ -24,7 +27,6 @@ export interface Task {
     lastActivity: Date;
     gitState?: TaskGitState; // Git state for revert functionality
     waitingInputType?: WaitingInputType; // Type of input Claude is waiting for
-    systemPrompt?: string;   // Custom system prompt for this task
 }
 
 export interface Workspace {

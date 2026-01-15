@@ -149,7 +149,7 @@ interface WorkspaceSectionProps {
     onArchiveTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
     onDeleteWorkspace: () => void;
-    onCreateTask: (prompt: string, systemPrompt?: string) => void;
+    onCreateTask: (prompt: string) => void;
 }
 
 function WorkspaceSection({
@@ -168,8 +168,6 @@ function WorkspaceSection({
 }: WorkspaceSectionProps) {
     const [inputValue, setInputValue] = useState('');
     const [interimTranscript, setInterimTranscript] = useState('');
-    const [systemPrompt, setSystemPrompt] = useState('');
-    const [showAdvanced, setShowAdvanced] = useState(false);
     const voiceInputRef = useRef<VoiceInputHandle>(null);
 
     const handleSubmit = (e: React.FormEvent) => {
@@ -177,11 +175,9 @@ function WorkspaceSection({
         // Stop voice recording when submitting
         voiceInputRef.current?.stopListening();
         if (inputValue.trim()) {
-            onCreateTask(inputValue.trim(), systemPrompt.trim() || undefined);
+            onCreateTask(inputValue.trim());
             setInputValue('');
             setInterimTranscript('');
-            setSystemPrompt('');
-            setShowAdvanced(false);
         }
     };
 
@@ -243,8 +239,7 @@ function WorkspaceSection({
                     <form className="task-input-form" onSubmit={handleSubmit}>
                         <div className="task-input-row">
                             <div className="task-input-wrapper">
-                                <input
-                                    type="text"
+                                <textarea
                                     className="task-input"
                                     placeholder="Type or speak a task..."
                                     value={inputValue + (interimTranscript ? (inputValue ? ' ' : '') + interimTranscript : '')}
@@ -253,6 +248,7 @@ function WorkspaceSection({
                                         setInterimTranscript('');
                                     }}
                                     onKeyDown={handleKeyDown}
+                                    rows={2}
                                 />
                                 {interimTranscript && (
                                     <span className="interim-indicator">listening...</span>
@@ -272,26 +268,6 @@ function WorkspaceSection({
                                 <Send size={16} />
                             </button>
                         </div>
-                        <button
-                            type="button"
-                            className="advanced-toggle"
-                            onClick={() => setShowAdvanced(!showAdvanced)}
-                        >
-                            {showAdvanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                            <span>System Prompt</span>
-                            {systemPrompt && <span className="system-prompt-indicator">*</span>}
-                        </button>
-                        {showAdvanced && (
-                            <div className="system-prompt-section">
-                                <textarea
-                                    className="system-prompt-input"
-                                    placeholder="Custom instructions for this task..."
-                                    value={systemPrompt}
-                                    onChange={(e) => setSystemPrompt(e.target.value)}
-                                    rows={3}
-                                />
-                            </div>
-                        )}
                     </form>
                 </div>
             )}
@@ -305,7 +281,7 @@ interface WorkspacePanelProps {
     onArchiveTask: (taskId: string) => void;
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
-    onCreateTask: (prompt: string, workspaceId: string, systemPrompt?: string) => void;
+    onCreateTask: (prompt: string, workspaceId: string) => void;
     onSelectTask: (taskId: string) => void;
 }
 
@@ -399,7 +375,7 @@ export function WorkspacePanel({
                             onArchiveTask={onArchiveTask}
                             onSelectTask={onSelectTask}
                             onDeleteWorkspace={() => onDeleteWorkspace(workspace.id)}
-                            onCreateTask={(prompt, systemPrompt) => onCreateTask(prompt, workspace.id, systemPrompt)}
+                            onCreateTask={(prompt) => onCreateTask(prompt, workspace.id)}
                         />
                     ))
                 )}

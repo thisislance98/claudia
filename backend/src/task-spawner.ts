@@ -4,8 +4,27 @@ import { Task, TaskState, TaskGitState, WaitingInputType } from '@claudia/shared
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
+import { execSync } from 'child_process';
 import { ConfigStore } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
+
+// Find absolute path to claude CLI for reliability
+const CLAUDE_PATH = '/Users/I850333/.nvm/versions/node/v20.19.3/bin/claude';
+
+/**
+ * Check if Claude Code CLI is installed and available
+ */
+export function checkClaudeCodeInstalled(): { installed: boolean; version?: string; error?: string } {
+    try {
+        const version = execSync('claude --version', { encoding: 'utf8', timeout: 5000 }).trim();
+        return { installed: true, version };
+    } catch (error) {
+        return {
+            installed: false,
+            error: 'Claude Code CLI is not installed. Please install it from: https://claude.ai/code'
+        };
+    }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -372,8 +391,8 @@ export class TaskSpawner extends EventEmitter {
 
     private isReadyForInitialInput(str: string): boolean {
         return str.includes('Try "') ||
-               str.includes('? for shortcuts') ||
-               (str.includes('───') && str.includes('❯'));
+            str.includes('? for shortcuts') ||
+            (str.includes('───') && str.includes('❯'));
     }
 
     /**

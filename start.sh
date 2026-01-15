@@ -5,6 +5,14 @@
 
 set -e
 
+# ============================================
+# PORT CONFIGURATION - Single source of truth
+# ============================================
+BACKEND_PORT=4001
+FRONTEND_PORT=5173
+OPENCODE_PORT=4097
+# ============================================
+
 # Ensure OpenCode CLI is in PATH
 export PATH=$HOME/.opencode/bin:$PATH
 
@@ -21,9 +29,8 @@ export AICORE_RESOURCE_GROUP='default'
 
 echo "🧹 Cleaning up existing processes..."
 
-# Kill processes on our ports (not 3030 - SAP AI Proxy runs there)
-# 3001: Backend, 5173: Frontend, 4097: Internal OpenCode Server
-for port in 3001 5173 4097; do
+# Kill processes on our ports
+for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
     pids=$(lsof -ti:$port 2>/dev/null || true)
     if [ -n "$pids" ]; then
         echo "   Killing processes on port $port: $pids"
@@ -31,7 +38,6 @@ for port in 3001 5173 4097; do
     fi
 done
 
-# Kill any lingering node/tsx processes related to this project
 # Kill any lingering node/tsx processes related to this project
 pkill -f "tsx watch src/index.ts" 2>/dev/null || true
 pkill -f "vite.*codeui" 2>/dev/null || true
@@ -47,7 +53,7 @@ pgrep -f "node" | xargs -I {} sh -c 'lsof -p {} | grep "'$(pwd)'" >/dev/null && 
 sleep 1
 
 # Verify ports are free
-for port in 3001 5173 4097; do
+for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
     if lsof -ti:$port >/dev/null 2>&1; then
         echo "❌ Port $port is still in use. Please kill manually:"
         lsof -i:$port
@@ -58,8 +64,8 @@ done
 echo "✅ Ports are free"
 echo ""
 echo "🔮 Starting Claudia..."
-echo "   Backend: http://localhost:3001 (auto-reloads on file changes)"
-echo "   Frontend: http://localhost:5173 (auto-reloads on file changes)"
+echo "   Backend: http://localhost:$BACKEND_PORT (auto-reloads on file changes)"
+echo "   Frontend: http://localhost:$FRONTEND_PORT (auto-reloads on file changes)"
 echo ""
 echo "💡 Multi-Instance Development:"
 echo "   - Backend uses tsx watch (auto-reloads on save)"
@@ -71,7 +77,11 @@ echo ""
 # Start from project root
 cd "$(dirname "$0")"
 
+# Export PORT for the backend to use
+export PORT=$BACKEND_PORT
+
 # Start backend and frontend
 # Backend: tsx watch auto-reloads on .ts file changes
 # Frontend: Vite HMR auto-reloads on file changes
 npm run dev
+

@@ -49,6 +49,7 @@ interface TaskStore {
     // Settings
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
+    aiCoreConfigured: boolean | null; // null = not checked yet, false = not configured, true = configured
 
     // Actions
     setConnected: (connected: boolean) => void;
@@ -88,6 +89,7 @@ interface TaskStore {
     // Settings actions
     setAutoFocusOnInput: (enabled: boolean) => void;
     setSupervisorEnabled: (enabled: boolean) => void;
+    setAiCoreConfigured: (configured: boolean | null) => void;
 }
 
 export const useTaskStore = create<TaskStore>((set, get) => ({
@@ -121,6 +123,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     // Settings initial state
     autoFocusOnInput: false,
     supervisorEnabled: false,
+    aiCoreConfigured: null,
 
     // Actions
     setConnected: (connected) => {
@@ -257,5 +260,6 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
 
     // Settings actions
     setAutoFocusOnInput: (enabled) => set({ autoFocusOnInput: enabled }),
-    setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled })
+    setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled }),
+    setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured })
 }));

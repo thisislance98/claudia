@@ -9,7 +9,7 @@
 
 That's it! Both backend and frontend will run with auto-reload enabled.
 
-- **Backend:** http://localhost:3001 (auto-reloads on changes)
+- **Backend:** http://localhost:4001 (auto-reloads on changes)
 - **Frontend:** http://localhost:5173 (auto-reloads on changes)
 
 ### Multiple Claude Instances?
@@ -86,7 +86,7 @@ cd backend && npx tsx test-cli.ts --list-tasks
 cd backend && npx tsx test-cli.ts --help
 
 # Check if backend is running
-lsof -ti:3001
+lsof -ti:4001
 
 # Check if frontend is running
 lsof -ti:5173
@@ -114,9 +114,9 @@ sleep 2
 
 ## Links
 
-- Backend: http://localhost:3001
+- Backend: http://localhost:4001
 - Frontend: http://localhost:5173
-- WebSocket: ws://localhost:3001
+- WebSocket: ws://localhost:4001
 
 ## Support
 

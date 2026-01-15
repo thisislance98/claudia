@@ -2,6 +2,7 @@
  * API Configuration - Centralized URL management for backend API
  * Supports both web (development/production) and Electron environments
  */
+import { PORTS } from '@claudia/shared';
 
 /**
  * Get the base URL for HTTP API requests
@@ -13,8 +14,8 @@ export function getApiBaseUrl(): string {
         return window.electronAPI.getBackendUrl();
     }
 
-    // Web environment - use hostname with port 3001
-    return `http://${window.location.hostname}:3001`;
+    // Web environment - use hostname with configured port
+    return `http://${window.location.hostname}:${PORTS.BACKEND}`;
 }
 
 /**
@@ -28,8 +29,8 @@ export function getWebSocketUrl(): string {
         return httpUrl.replace('http://', 'ws://');
     }
 
-    // Web environment - use hostname with port 3001
-    return `ws://${window.location.hostname}:3001`;
+    // Web environment - use hostname with configured port
+    return `ws://${window.location.hostname}:${PORTS.BACKEND}`;
 }
 
 /**

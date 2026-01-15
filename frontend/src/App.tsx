@@ -6,7 +6,8 @@ import { ProjectPicker } from './components/ProjectPicker';
 import { SettingsMenu } from './components/SettingsMenu';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw } from 'lucide-react';
+import { getApiBaseUrl } from './config/api-config';
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
 const DEFAULT_SIDEBAR_WIDTH = 640;
@@ -26,7 +27,7 @@ function App() {
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, supervisorEnabled } = useTaskStore();
+    const { selectedTaskId, tasks, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, supervisorEnabled, aiCoreConfigured } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
 
     const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -48,8 +49,10 @@ function App() {
     const [isResizing, setIsResizing] = useState(false);
     const [isResizingChat, setIsResizingChat] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
+    const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
     const sidebarRef = useRef<HTMLElement>(null);
+    const aiCoreCheckDoneRef = useRef(false);
 
     const handleMouseDown = () => {
         setIsResizing(true);
@@ -139,6 +142,37 @@ function App() {
         }
     }, [supervisorEnabled, showChatPanel]);
 
+    // Open settings to AI Core panel if credentials are not configured (only once on startup)
+    useEffect(() => {
+        if (aiCoreConfigured === false && !aiCoreCheckDoneRef.current) {
+            aiCoreCheckDoneRef.current = true;
+            setSettingsInitialPanel('aicore');
+            setShowSettings(true);
+        }
+    }, [aiCoreConfigured]);
+
+    // Clear initial panel when settings is closed
+    const handleSettingsClose = () => {
+        setShowSettings(false);
+        setSettingsInitialPanel(undefined);
+    };
+
+    // Open settings normally (without a specific panel)
+    const handleSettingsOpen = () => {
+        setSettingsInitialPanel(undefined);
+        setShowSettings(true);
+    };
+
+    // Restart the backend server
+    const handleRestartServer = async () => {
+        try {
+            await fetch(`${getApiBaseUrl()}/api/server/restart`, { method: 'POST' });
+        } catch (error) {
+            // Expected - server will disconnect
+            console.log('Server restart triggered');
+        }
+    };
+
     return (
         <div className="app">
             <header className="app-header">
@@ -159,8 +193,15 @@ function App() {
                         </button>
                     )}
                     <button
+                        className="restart-button"
+                        onClick={handleRestartServer}
+                        title="Restart Server"
+                    >
+                        <RotateCcw size={20} />
+                    </button>
+                    <button
                         className="settings-button"
-                        onClick={() => setShowSettings(true)}
+                        onClick={handleSettingsOpen}
                         title="Settings"
                     >
                         <Settings size={20} />
@@ -235,7 +276,7 @@ function App() {
             </main>
 
             <ProjectPicker onSelect={handleProjectSelect} />
-            <SettingsMenu isOpen={showSettings} onClose={() => setShowSettings(false)} />
+            <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
 
             {/* Server reloading overlay */}
             {(isServerReloading || !isConnected) && (

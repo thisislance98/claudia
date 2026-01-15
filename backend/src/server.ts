@@ -44,6 +44,54 @@ export function createApp(basePath?: string) {
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
 
+    // Helper to extract rules from CLAUDE.md (reverse sync)
+    function extractRulesFromClaudeMd(workspacePath: string): string | null {
+        const claudeMdPath = join(workspacePath, 'CLAUDE.md');
+        const marker = '<!-- CODEUI-RULES -->';
+        const endMarker = '<!-- /CODEUI-RULES -->';
+
+        if (!existsSync(claudeMdPath)) {
+            return null;
+        }
+
+        const content = readFileSync(claudeMdPath, 'utf-8');
+        const startIdx = content.indexOf(marker);
+        const endIdx = content.indexOf(endMarker);
+
+        if (startIdx === -1 || endIdx === -1) {
+            return null;
+        }
+
+        // Extract content between markers, removing the "## Custom Rules" header
+        const rulesContent = content.slice(startIdx + marker.length, endIdx);
+        const lines = rulesContent.split('\n');
+
+        // Filter out the "## Custom Rules" header and leading/trailing empty lines
+        const filteredLines = lines.filter((line, idx, arr) => {
+            const trimmed = line.trim();
+            if (trimmed === '## Custom Rules') return false;
+            return true;
+        });
+
+        return filteredLines.join('\n').trim();
+    }
+
+    // On startup, sync rules FROM CLAUDE.md if config.rules is empty
+    (function initRulesFromClaudeMd() {
+        const config = configStore.getConfig();
+        if (!config.rules) {
+            const workspaces = workspaceStore.getWorkspaces();
+            for (const workspace of workspaces) {
+                const rules = extractRulesFromClaudeMd(workspace.id);
+                if (rules) {
+                    console.log(`[Server] Found existing rules in ${workspace.id}/CLAUDE.md, syncing to config`);
+                    configStore.updateConfig({ rules });
+                    break; // Use rules from first workspace that has them
+                }
+            }
+        }
+    })();
+
     // Track connected clients
     const clients = new Set<WebSocket>();
 
@@ -65,6 +113,7 @@ export function createApp(basePath?: string) {
     });
 
     taskSpawner.on('taskStateChanged', (task: Task) => {
+        console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
         broadcast({ type: 'task:stateChanged', payload: { task } });
         broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
     });
@@ -124,12 +173,12 @@ export function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, systemPrompt } = message.payload;
+                        const { prompt, workspaceId } = message.payload;
                         if (!prompt || !workspaceId) {
                             console.error('[Server] task:create requires prompt and workspaceId');
                             return;
                         }
-                        taskSpawner.createTask(prompt, workspaceId, systemPrompt);
+                        taskSpawner.createTask(prompt, workspaceId);
                         break;
                     }
 
@@ -328,7 +377,31 @@ export function createApp(basePath?: string) {
 
     // Config API routes
     app.get('/api/config', (_req, res) => {
-        res.json(configStore.getConfig());
+        // If rules are empty, try to sync from CLAUDE.md files
+        const config = configStore.getConfig();
+        if (!config.rules) {
+            const workspaces = workspaceStore.getWorkspaces();
+            for (const workspace of workspaces) {
+                const rules = extractRulesFromClaudeMd(workspace.id);
+                if (rules) {
+                    console.log(`[Server] Syncing rules from ${workspace.id}/CLAUDE.md to config`);
+                    configStore.updateConfig({ rules });
+                    const updatedConfig = configStore.getConfig();
+                    // Add aiCoreConfigured flag based on env vars (takes precedence over config file)
+                    const aiCoreConfiguredFromEnv = !!(
+                        process.env.SAP_AICORE_CLIENT_ID &&
+                        process.env.SAP_AICORE_CLIENT_SECRET
+                    );
+                    return res.json({ ...updatedConfig, aiCoreConfiguredFromEnv });
+                }
+            }
+        }
+        // Add aiCoreConfigured flag based on env vars (takes precedence over config file)
+        const aiCoreConfiguredFromEnv = !!(
+            process.env.SAP_AICORE_CLIENT_ID &&
+            process.env.SAP_AICORE_CLIENT_SECRET
+        );
+        res.json({ ...config, aiCoreConfiguredFromEnv });
     });
 
     app.put('/api/config', (req, res) => {
@@ -577,6 +650,17 @@ export function createApp(basePath?: string) {
             console.error('[Server] Failed to get session conversation:', error);
             res.status(500).json({ error: 'Failed to get conversation' });
         }
+    });
+
+    // Restart server endpoint - triggers graceful shutdown, tsx watch will restart
+    app.post('/api/server/restart', (_req, res) => {
+        console.log('[Server] Restart requested via API');
+        res.json({ status: 'restarting' });
+
+        // Give time for response to be sent, then trigger graceful shutdown
+        setTimeout(() => {
+            gracefulShutdown('RESTART');
+        }, 100);
     });
 
     // Graceful shutdown handler

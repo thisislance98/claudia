@@ -80,6 +80,15 @@ export function useWebSocket() {
                                 if (config.supervisorEnabled !== undefined) {
                                     useTaskStore.getState().setSupervisorEnabled(config.supervisorEnabled);
                                 }
+                                // Check if AI Core credentials are configured
+                                // Prefer env vars (aiCoreConfiguredFromEnv) over config file credentials
+                                const aiCoreConfigured = config.aiCoreConfiguredFromEnv || !!(
+                                    config.aiCoreCredentials?.clientId &&
+                                    config.aiCoreCredentials?.clientSecret &&
+                                    config.aiCoreCredentials?.authUrl &&
+                                    config.aiCoreCredentials?.baseUrl
+                                );
+                                useTaskStore.getState().setAiCoreConfigured(aiCoreConfigured);
                             })
                             .catch(err => console.error('Failed to fetch config:', err));
                         break;
@@ -167,10 +176,12 @@ export function useWebSocket() {
                     }
                     case 'task:stateChanged': {
                         const payload = message.payload as { task?: Task; tasks?: Task[] };
+                        console.log('[WebSocket] task:stateChanged received:', payload.task?.id, 'state:', payload.task?.state);
                         if (payload.task) {
                             updateTask(payload.task);
-                            // Clear waiting input notification when task becomes busy
-                            if (payload.task.state === 'busy') {
+                            // Clear waiting input notification when task becomes busy OR idle
+                            // (idle means Claude finished and isn't asking anything)
+                            if (payload.task.state === 'busy' || payload.task.state === 'idle') {
                                 clearWaitingInput(payload.task.id);
                             }
                         }
@@ -241,8 +252,8 @@ export function useWebSocket() {
     }, []);
 
     // Task actions
-    const createTask = useCallback((prompt: string, workspaceId: string, systemPrompt?: string) => {
-        sendMessage('task:create', { prompt, workspaceId, systemPrompt });
+    const createTask = useCallback((prompt: string, workspaceId: string) => {
+        sendMessage('task:create', { prompt, workspaceId });
     }, [sendMessage]);
 
     const selectTaskOnServer = useCallback((taskId: string) => {
@@ -267,6 +278,10 @@ export function useWebSocket() {
 
     const restoreTask = useCallback((taskId: string) => {
         sendMessage('task:restore', { taskId });
+    }, [sendMessage]);
+
+    const reconnectTask = useCallback((taskId: string) => {
+        sendMessage('task:reconnect', { taskId });
     }, [sendMessage]);
 
     const archiveTask = useCallback((taskId: string) => {
@@ -312,6 +327,7 @@ export function useWebSocket() {
         destroyTask,
         interruptTask,
         restoreTask,
+        reconnectTask,
         archiveTask,
         createWorkspace,
         deleteWorkspace,

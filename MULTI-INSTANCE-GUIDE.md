@@ -19,7 +19,9 @@ That's it! Backend and frontend will auto-reload as Claude instances make change
 
 ## 🔄 Auto-Reload Configuration
 
-### Backend (Port 3001)
+### Backend (Port 4001)
+
+By default, the backend runs on port 4001.
 - **Technology:** `tsx watch`
 - **Watches:** All `.ts` files in `backend/src/`
 - **Reload time:** 1-2 seconds after file save
@@ -122,7 +124,7 @@ Instance 1 (Task A)          Instance 2 (Task B)          Instance 3 (Task C)
 4. **Don't check if backend is "ready"**
    ```bash
    # ❌ BAD
-   while ! curl localhost:3001; do sleep 1; done
+   while ! curl localhost:4001; do sleep 1; done
 
    # ✅ GOOD
    # It's always ready (auto-reload is fast)
@@ -140,7 +142,7 @@ Instance 1 (Task A)          Instance 2 (Task B)          Instance 3 (Task C)
 
 Expected output:
 ```
-✅ Backend is running on port 3001
+✅ Backend is running on port 4001
 🎯 Verified Configuration:
    - Backend: tsx watch src/index.ts ✅
    - Auto-reload: ON ✅
@@ -208,7 +210,7 @@ Backend does NOT reload for:
 ps aux | grep "tsx watch"
 
 # 2. Check if backend is running
-lsof -ti:3001
+lsof -ti:4001
 
 # 3. Restart everything
 ./start.sh

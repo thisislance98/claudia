@@ -65,7 +65,8 @@ body {
 }
 
 /* Settings Button */
-.settings-button {
+.settings-button,
+.restart-button {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -82,6 +83,12 @@ body {
   background: var(--bg-tertiary);
   color: var(--accent-secondary);
   border-color: var(--accent-secondary);
+}
+
+.restart-button:hover {
+  background: var(--bg-tertiary);
+  color: var(--accent-warning, #f59e0b);
+  border-color: var(--accent-warning, #f59e0b);
 }
 
 /* Header Controls */
