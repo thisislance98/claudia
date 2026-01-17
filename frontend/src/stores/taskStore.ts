@@ -19,9 +19,12 @@ interface VoiceSettings {
 interface TaskStore {
     // State
     tasks: Map<string, Task>;
+    archivedTasks: Task[];
+    showArchivedTasks: boolean;
     selectedTaskId: string | null;
     isConnected: boolean;
     isServerReloading: boolean;  // True when server is restarting (hot reload)
+    isOffline: boolean;  // True when browser has no internet connection
 
     // Workspace state
     workspaces: Workspace[];
@@ -62,11 +65,17 @@ interface TaskStore {
     // Actions
     setConnected: (connected: boolean) => void;
     setServerReloading: (reloading: boolean) => void;
+    setOffline: (offline: boolean) => void;
     selectTask: (id: string | null) => void;
     setTasks: (tasks: Task[]) => void;
     addTask: (task: Task) => void;
     updateTask: (task: Task) => void;
     deleteTask: (taskId: string) => void;
+
+    // Archived tasks actions
+    setArchivedTasks: (tasks: Task[]) => void;
+    setShowArchivedTasks: (show: boolean) => void;
+    removeArchivedTask: (taskId: string) => void;
 
     // Workspace actions
     setWorkspaces: (workspaces: Workspace[]) => void;
@@ -113,9 +122,12 @@ interface TaskStore {
 export const useTaskStore = create<TaskStore>((set, get) => ({
     // Initial state
     tasks: new Map(),
+    archivedTasks: [],
+    showArchivedTasks: false,
     selectedTaskId: null,
     isConnected: false,
     isServerReloading: false,
+    isOffline: typeof navigator !== 'undefined' ? !navigator.onLine : false,
     workspaces: [],
     expandedWorkspaces: new Set<string>(),
     showProjectPicker: false,
@@ -163,6 +175,8 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
 
     setServerReloading: (reloading) => set({ isServerReloading: reloading }),
 
+    setOffline: (offline) => set({ isOffline: offline }),
+
     selectTask: (id) => set({ selectedTaskId: id }),
 
     setTasks: (tasks) => {
@@ -196,6 +210,14 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         newTasks.delete(taskId);
         const newSelectedId = selectedTaskId === taskId ? null : selectedTaskId;
         set({ tasks: newTasks, selectedTaskId: newSelectedId });
+    },
+
+    // Archived tasks actions
+    setArchivedTasks: (tasks) => set({ archivedTasks: tasks }),
+    setShowArchivedTasks: (show) => set({ showArchivedTasks: show }),
+    removeArchivedTask: (taskId) => {
+        const { archivedTasks } = get();
+        set({ archivedTasks: archivedTasks.filter(t => t.id !== taskId) });
     },
 
     // Workspace actions

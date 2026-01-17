@@ -1992,6 +1992,18 @@ body {
   color: var(--text-primary);
 }
 
+/* Offline Warning Styles */
+.server-reload-overlay.offline-warning .server-reload-content svg {
+  color: var(--accent-red);
+}
+
+.offline-hint {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin: 0;
+  text-align: center;
+}
+
 /* Voice Active Input Glow */
 .task-input-bar.voice-active .task-input-container,
 .task-input-wrapper.voice-active {

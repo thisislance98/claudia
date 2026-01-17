@@ -19,6 +19,7 @@ export function useWebSocket() {
     const {
         setConnected,
         setServerReloading,
+        setOffline,
         setTasks,
         addTask,
         updateTask,
@@ -32,7 +33,9 @@ export function useWebSocket() {
         setChatMessages,
         setChatTyping,
         setWaitingInput,
-        clearWaitingInput
+        clearWaitingInput,
+        setArchivedTasks,
+        removeArchivedTask
     } = useTaskStore();
 
     const connect = useCallback(() => {
@@ -130,6 +133,12 @@ export function useWebSocket() {
                         removeWorkspace(payload.workspaceId);
                         break;
                     }
+                    case 'workspace:reordered': {
+                        const payload = message.payload as { workspaces: Workspace[] };
+                        console.log('[WebSocket] Workspaces reordered');
+                        setWorkspaces(payload.workspaces);
+                        break;
+                    }
                     case 'task:summary': {
                         const payload = message.payload as { summary: TaskSummary };
                         console.log('[WebSocket] Task summary received:', payload.summary);
@@ -210,6 +219,27 @@ export function useWebSocket() {
                         setServerReloading(true);
                         break;
                     }
+                    case 'task:archived:list': {
+                        const payload = message.payload as { tasks: Task[] };
+                        console.log('[WebSocket] Archived tasks received:', payload.tasks.length);
+                        setArchivedTasks(payload.tasks);
+                        break;
+                    }
+                    case 'task:archived:restored': {
+                        const payload = message.payload as { task: Task };
+                        console.log('[WebSocket] Archived task restored:', payload.task.id);
+                        removeArchivedTask(payload.task.id);
+                        addTask(payload.task);
+                        break;
+                    }
+                    case 'task:archived:deleted': {
+                        const payload = message.payload as { taskId: string; success: boolean };
+                        console.log('[WebSocket] Archived task deleted:', payload.taskId, payload.success);
+                        if (payload.success) {
+                            removeArchivedTask(payload.taskId);
+                        }
+                        break;
+                    }
                 }
             } catch (err) {
                 console.error('[WebSocket] Error parsing message:', err);
@@ -217,7 +247,7 @@ export function useWebSocket() {
         };
 
         wsRef.current = ws;
-    }, [setConnected, setTasks, addTask, updateTask, deleteTask, selectTask, setWorkspaces, addWorkspace, removeWorkspace, setTaskSummary, addChatMessage, setChatMessages, setChatTyping, setWaitingInput, clearWaitingInput]);
+    }, [setConnected, setTasks, addTask, updateTask, deleteTask, selectTask, setWorkspaces, addWorkspace, removeWorkspace, setTaskSummary, addChatMessage, setChatMessages, setChatTyping, setWaitingInput, clearWaitingInput, setArchivedTasks, removeArchivedTask]);
 
     const sendMessage = useCallback((type: string, payload: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -230,6 +260,7 @@ export function useWebSocket() {
 
     // Poll task statuses for more reliable state detection
     // Backend uses output-based detection (checking for "ctrl+c to interrupt" etc.)
+    // Note: Backend now handles state change events, polling is just a safety net
     const pollTaskStatuses = useCallback(async () => {
         const { tasks } = useTaskStore.getState();
         let hasBusyTasks = false;
@@ -246,10 +277,12 @@ export function useWebSocket() {
                 const response = await fetch(`${API_URL}/api/tasks/${taskId}/status`);
                 if (response.ok) {
                     const status = await response.json();
-                    // Update state if server state differs from current
-                    if (status.state && status.state !== task.state) {
-                        console.log(`[Poll] Task ${taskId} state: ${task.state} -> ${status.state}`);
-                        updateTask({ ...task, state: status.state as TaskState });
+                    // Re-fetch current state to avoid race conditions with WebSocket updates
+                    const currentTask = useTaskStore.getState().tasks.get(taskId);
+                    // Only update if server state differs from CURRENT state (not stale loop state)
+                    if (status.state && currentTask && status.state !== currentTask.state) {
+                        console.log(`[Poll] Task ${taskId} state: ${currentTask.state} -> ${status.state}`);
+                        updateTask({ ...currentTask, state: status.state as TaskState });
                     }
                 }
             } catch (err) {
@@ -272,6 +305,22 @@ export function useWebSocket() {
         // Start polling for task statuses (start with faster interval)
         pollIntervalRef.current = window.setInterval(pollTaskStatuses, STATUS_POLL_INTERVAL_BUSY);
 
+        // Listen for online/offline events
+        const handleOnline = () => {
+            console.log('[Network] Browser is online');
+            setOffline(false);
+            // Attempt to reconnect when coming back online
+            connect();
+        };
+
+        const handleOffline = () => {
+            console.log('[Network] Browser is offline');
+            setOffline(true);
+        };
+
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+
         return () => {
             if (reconnectTimeoutRef.current) {
                 clearTimeout(reconnectTimeoutRef.current);
@@ -279,6 +328,8 @@ export function useWebSocket() {
             if (pollIntervalRef.current) {
                 clearInterval(pollIntervalRef.current);
             }
+            window.removeEventListener('online', handleOnline);
+            window.removeEventListener('offline', handleOffline);
             wsRef.current?.close();
         };
     }, []);
@@ -333,6 +384,10 @@ export function useWebSocket() {
         sendMessage('workspace:delete', { workspaceId });
     }, [sendMessage]);
 
+    const reorderWorkspaces = useCallback((fromIndex: number, toIndex: number) => {
+        sendMessage('workspace:reorder', { fromIndex, toIndex });
+    }, [sendMessage]);
+
     // Supervisor actions
     const executeSupervisorAction = useCallback((taskId: string, action: SuggestedAction) => {
         sendMessage('supervisor:action', { taskId, action });
@@ -355,6 +410,19 @@ export function useWebSocket() {
         sendMessage('supervisor:chat:clear', {});
     }, [sendMessage]);
 
+    // Archived task actions
+    const requestArchivedTasks = useCallback(() => {
+        sendMessage('task:archived:list', {});
+    }, [sendMessage]);
+
+    const restoreArchivedTask = useCallback((taskId: string) => {
+        sendMessage('task:archived:restore', { taskId });
+    }, [sendMessage]);
+
+    const deleteArchivedTask = useCallback((taskId: string) => {
+        sendMessage('task:archived:delete', { taskId });
+    }, [sendMessage]);
+
     return {
         createTask,
         selectTaskOnServer,
@@ -368,11 +436,15 @@ export function useWebSocket() {
         revertTask,
         createWorkspace,
         deleteWorkspace,
+        reorderWorkspaces,
         executeSupervisorAction,
         requestTaskAnalysis,
         sendChatMessage,
         requestChatHistory,
         clearChatHistory,
+        requestArchivedTasks,
+        restoreArchivedTask,
+        deleteArchivedTask,
         wsRef
     };
 }

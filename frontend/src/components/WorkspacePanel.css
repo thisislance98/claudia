@@ -798,3 +798,130 @@
     color: var(--text-secondary);
 }
 
+/* Workspace Panel Header Actions */
+.workspace-panel-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.archived-toggle-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.archived-toggle-button:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--text-muted);
+    color: var(--text-primary);
+}
+
+.archived-toggle-button.active {
+    background: var(--accent-primary);
+    border-color: var(--accent-secondary);
+    color: var(--accent-secondary);
+}
+
+/* Archived Tasks Section */
+.archived-tasks-section {
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+}
+
+.archived-tasks-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.archived-tasks-count {
+    font-size: 0.6875rem;
+    font-weight: 400;
+    padding: 2px 6px;
+    background: var(--bg-primary);
+    border-radius: 10px;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
+.empty-archived {
+    padding: 12px 16px;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    font-style: italic;
+    text-align: center;
+}
+
+.archived-task-list {
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.archived-task-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+}
+
+.archived-task-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.archived-task-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.archived-task-prompt {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.archived-task-date {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+}
+
+.archived-task-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.archived-task-item:hover .archived-task-actions {
+    opacity: 1;
+}
+
+.task-action-button.restore {
+    color: var(--accent-secondary);
+}
+
+.task-action-button.restore:hover {
+    background: rgba(0, 212, 255, 0.15);
+    color: var(--accent-secondary);
+}
+

@@ -188,8 +188,10 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
                         // Write history - it goes into scrollback buffer
                         // Claude's TUI will redraw the screen but history remains scrollable
                         term.write(history);
-                        // Scroll to bottom to show current state
-                        term.scrollToBottom();
+                        // Scroll to bottom to show current state after rendering completes
+                        requestAnimationFrame(() => {
+                            term.scrollToBottom();
+                        });
                     }
                 }
             } catch (err) {

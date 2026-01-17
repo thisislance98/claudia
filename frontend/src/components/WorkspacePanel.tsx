@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw
 } from 'lucide-react';
 import './WorkspacePanel.css';
 
@@ -353,6 +353,50 @@ function WorkspaceSection({
     );
 }
 
+interface ArchivedTaskItemProps {
+    task: Task;
+    onRestore: (taskId: string) => void;
+    onDelete: (taskId: string) => void;
+}
+
+function ArchivedTaskItem({ task, onRestore, onDelete }: ArchivedTaskItemProps) {
+    // Split prompt by ⏺ dots and get the last segment for display
+    const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
+    const lastSegment = segments.length > 0 ? segments[segments.length - 1] : task.prompt;
+
+    // Format date
+    const archivedDate = new Date(task.lastActivity).toLocaleDateString();
+
+    return (
+        <div className="archived-task-item">
+            <div className="archived-task-info">
+                <span className="archived-task-prompt" title={task.prompt}>{lastSegment}</span>
+                <span className="archived-task-date">{archivedDate}</span>
+            </div>
+            <div className="archived-task-actions">
+                <button
+                    className="task-action-button restore"
+                    onClick={() => onRestore(task.id)}
+                    title="Restore task"
+                >
+                    <RotateCcw size={12} />
+                </button>
+                <button
+                    className="task-action-button delete"
+                    onClick={() => {
+                        if (window.confirm('Permanently delete this archived task? This cannot be undone.')) {
+                            onDelete(task.id);
+                        }
+                    }}
+                    title="Delete permanently"
+                >
+                    <Trash2 size={12} />
+                </button>
+            </div>
+        </div>
+    );
+}
+
 interface WorkspacePanelProps {
     onDeleteTask: (taskId: string) => void;
     onInterruptTask: (taskId: string) => void;
@@ -360,8 +404,12 @@ interface WorkspacePanelProps {
     onRevertTask: (taskId: string) => void;
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
+    onReorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     onCreateTask: (prompt: string, workspaceId: string) => void;
     onSelectTask: (taskId: string) => void;
+    onRequestArchivedTasks?: () => void;
+    onRestoreArchivedTask?: (taskId: string) => void;
+    onDeleteArchivedTask?: (taskId: string) => void;
 }
 
 export function WorkspacePanel({
@@ -370,8 +418,12 @@ export function WorkspacePanel({
     onArchiveTask,
     onRevertTask,
     onDeleteWorkspace,
+    onReorderWorkspaces,
     onCreateTask,
-    onSelectTask
+    onSelectTask,
+    onRequestArchivedTasks,
+    onRestoreArchivedTask,
+    onDeleteArchivedTask
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -381,7 +433,9 @@ export function WorkspacePanel({
         toggleWorkspaceExpanded,
         setShowProjectPicker,
         waitingInputNotifications,
-        reorderWorkspaces
+        archivedTasks,
+        showArchivedTasks,
+        setShowArchivedTasks
     } = useTaskStore();
 
     // Drag and drop state
@@ -401,11 +455,12 @@ export function WorkspacePanel({
 
     const handleDragEnd = useCallback(() => {
         if (dragIndex !== null && dragOverIndex !== null && dragIndex !== dragOverIndex) {
-            reorderWorkspaces(dragIndex, dragOverIndex);
+            // Send to backend - it will broadcast back to update local state
+            onReorderWorkspaces(dragIndex, dragOverIndex);
         }
         setDragIndex(null);
         setDragOverIndex(null);
-    }, [dragIndex, dragOverIndex, reorderWorkspaces]);
+    }, [dragIndex, dragOverIndex, onReorderWorkspaces]);
 
     const prevWaitingRef = useRef<Set<string>>(new Set());
 
@@ -430,6 +485,14 @@ export function WorkspacePanel({
         setShowProjectPicker(true);
     };
 
+    const handleToggleArchivedTasks = () => {
+        const newShow = !showArchivedTasks;
+        setShowArchivedTasks(newShow);
+        if (newShow && onRequestArchivedTasks) {
+            onRequestArchivedTasks();
+        }
+    };
+
     // Get task IDs that have active questions
     const waitingInputTaskIds = new Set(waitingInputNotifications.keys());
 
@@ -444,14 +507,47 @@ export function WorkspacePanel({
         <div className="workspace-panel">
             <div className="workspace-panel-header">
                 <h2>Workspaces</h2>
-                <button
-                    className="add-workspace-button"
-                    onClick={handleAddWorkspace}
-                    title="Add workspace"
-                >
-                    <Plus size={16} />
-                </button>
+                <div className="workspace-panel-header-actions">
+                    <button
+                        className={`archived-toggle-button ${showArchivedTasks ? 'active' : ''}`}
+                        onClick={handleToggleArchivedTasks}
+                        title={showArchivedTasks ? 'Hide archived tasks' : 'Show archived tasks'}
+                    >
+                        <Archive size={16} />
+                    </button>
+                    <button
+                        className="add-workspace-button"
+                        onClick={handleAddWorkspace}
+                        title="Add workspace"
+                    >
+                        <Plus size={16} />
+                    </button>
+                </div>
             </div>
+
+            {showArchivedTasks && (
+                <div className="archived-tasks-section">
+                    <div className="archived-tasks-header">
+                        <Archive size={14} />
+                        <span>Archived Tasks</span>
+                        <span className="archived-tasks-count">{archivedTasks.length}</span>
+                    </div>
+                    {archivedTasks.length === 0 ? (
+                        <div className="empty-archived">No archived tasks</div>
+                    ) : (
+                        <div className="archived-task-list">
+                            {archivedTasks.map(task => (
+                                <ArchivedTaskItem
+                                    key={task.id}
+                                    task={task}
+                                    onRestore={onRestoreArchivedTask || (() => {})}
+                                    onDelete={onDeleteArchivedTask || (() => {})}
+                                />
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
 
             <div className="workspace-panel-content">
                 {workspaces.length === 0 ? (

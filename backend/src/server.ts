@@ -25,8 +25,12 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:reconnect',
     'task:revert',
     'task:restore',
+    'task:archived:list',
+    'task:archived:restore',
+    'task:archived:delete',
     'workspace:create',
     'workspace:delete',
+    'workspace:reorder',
     'supervisor:action',
     'supervisor:analyze',
     'supervisor:chat:message',
@@ -140,7 +144,6 @@ export function createApp(basePath?: string) {
     // Broadcast to all connected clients
     function broadcast(message: WSMessage): void {
         const data = JSON.stringify(message);
-        console.log(`[Server] Broadcasting: type=${message.type}`);
         for (const client of clients) {
             try {
                 if (client.readyState === WebSocket.OPEN) {
@@ -258,7 +261,10 @@ export function createApp(basePath?: string) {
                 }
 
                 const message = parsed;
-                console.log('[Server] Received:', message.type);
+                // Only log non-frequent message types to avoid spam
+                if (message.type !== 'task:input' && message.type !== 'task:resize') {
+                    console.log('[Server] Received:', message.type);
+                }
 
                 const payload = message.payload || {};
 
@@ -370,6 +376,48 @@ export function createApp(basePath?: string) {
                         break;
                     }
 
+                    case 'task:archived:list': {
+                        // Get list of archived tasks
+                        const archivedTasks = taskSpawner.getArchivedTasks();
+                        ws.send(JSON.stringify({
+                            type: 'task:archived:list',
+                            payload: { tasks: archivedTasks }
+                        }));
+                        break;
+                    }
+
+                    case 'task:archived:restore': {
+                        // Restore an archived task back to active state
+                        const { taskId } = payload as { taskId?: string };
+                        if (!taskId) break;
+                        const restoredTask = taskSpawner.restoreArchivedTask(taskId);
+                        if (restoredTask) {
+                            ws.send(JSON.stringify({
+                                type: 'task:archived:restored',
+                                payload: { task: restoredTask }
+                            }));
+                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                        } else {
+                            ws.send(JSON.stringify({
+                                type: 'task:archived:restoreError',
+                                payload: { taskId, error: 'Task not found in archive' }
+                            }));
+                        }
+                        break;
+                    }
+
+                    case 'task:archived:delete': {
+                        // Permanently delete an archived task
+                        const { taskId } = payload as { taskId?: string };
+                        if (!taskId) break;
+                        const deleted = taskSpawner.deleteArchivedTask(taskId);
+                        ws.send(JSON.stringify({
+                            type: 'task:archived:deleted',
+                            payload: { taskId, success: deleted }
+                        }));
+                        break;
+                    }
+
                     case 'workspace:create': {
                         // Add a workspace
                         const { path } = payload as { path?: string };
@@ -389,6 +437,18 @@ export function createApp(basePath?: string) {
                         if (!workspaceId) break;
                         if (workspaceStore.deleteWorkspace(workspaceId)) {
                             broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId } });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:reorder': {
+                        // Reorder workspaces
+                        const { fromIndex, toIndex } = payload as { fromIndex?: number; toIndex?: number };
+                        if (typeof fromIndex !== 'number' || typeof toIndex !== 'number') break;
+                        if (workspaceStore.reorderWorkspaces(fromIndex, toIndex)) {
+                            // Broadcast updated workspace list to all clients
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:reordered' as WSMessageType, payload: { workspaces } });
                         }
                         break;
                     }
@@ -466,14 +526,13 @@ export function createApp(basePath?: string) {
         res.json(taskSpawner.getAllTasks());
     });
 
-    // Poll endpoint for task status - uses output-based detection for reliability
+    // Poll endpoint for task status - returns stored state (Stop hook manages transitions)
     app.get('/api/tasks/:taskId/status', (req, res) => {
         const { taskId } = req.params;
 
-        // Use output-based state detection for more reliable status
-        const actualState = taskSpawner.getActualTaskState(taskId);
+        const state = taskSpawner.getTaskState(taskId);
 
-        if (!actualState) {
+        if (!state) {
             return res.status(404).json({ error: 'Task not found' });
         }
 
@@ -481,8 +540,29 @@ export function createApp(basePath?: string) {
 
         res.json({
             id: taskId,
-            state: actualState,
+            state,
             lastActivity: task?.lastActivity
+        });
+    });
+
+    // Debug endpoint for task output analysis
+    app.get('/api/tasks/:taskId/debug', (req, res) => {
+        const { taskId } = req.params;
+        const task = taskSpawner.getTask(taskId);
+
+        if (!task) {
+            return res.status(404).json({ error: 'Task not found' });
+        }
+
+        // Get the raw output for debugging
+        const recentOutput = taskSpawner.getRecentOutputForDebug(taskId, 2048);
+
+        res.json({
+            taskId,
+            state: task.state,
+            outputLength: recentOutput.length,
+            last200Chars: recentOutput.slice(-200),
+            lastActivity: task.lastActivity
         });
     });
 
@@ -746,33 +826,13 @@ export function createApp(basePath?: string) {
         console.log(`[Server] Synced rules to ${claudeMdPath}`);
     }
 
-    // Claude Code PreToolUse Hook endpoint - fires when Claude starts using a tool (busy)
-    app.post('/api/claude-busy', (req, res) => {
-        const { session_id, tool_name } = req.body;
-        console.log(`[Server] Claude busy hook received for session: ${session_id}, tool: ${tool_name || 'unknown'}`);
-        if (session_id) {
-            taskSpawner.handleBusyHook(session_id, tool_name);
-        }
-        res.json({ ok: true });
-    });
-
-    // Claude Code Stop Hook endpoint
+    // Claude Code Stop Hook endpoint - single hook for state transitions
+    // Sets idle or waiting_input based on output parsing
     app.post('/api/claude-stopped', (req, res) => {
         const { session_id } = req.body;
         console.log(`[Server] Claude stop hook received for session: ${session_id}`);
         if (session_id) {
             taskSpawner.handleStopHook(session_id);
-        }
-        res.json({ ok: true });
-    });
-
-    // Claude Code Notification Hook endpoint
-    // Fires when Claude needs user input (permission_prompt, idle_prompt)
-    app.post('/api/claude-notification', (req, res) => {
-        const { session_id, notification_type } = req.body;
-        console.log(`[Server] Claude notification hook: ${notification_type} for session: ${session_id}`);
-        if (session_id && notification_type) {
-            taskSpawner.handleNotificationHook(session_id, notification_type);
         }
         res.json({ ok: true });
     });

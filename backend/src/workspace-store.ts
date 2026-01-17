@@ -144,4 +144,17 @@ export class WorkspaceStore {
         this.config.activeWorkspaceId = id;
         this.saveConfig();
     }
+
+    // Reorder workspaces by moving item from one index to another
+    reorderWorkspaces(fromIndex: number, toIndex: number): boolean {
+        if (fromIndex === toIndex) return false;
+        if (fromIndex < 0 || fromIndex >= this.config.workspaces.length) return false;
+        if (toIndex < 0 || toIndex >= this.config.workspaces.length) return false;
+
+        const [removed] = this.config.workspaces.splice(fromIndex, 1);
+        this.config.workspaces.splice(toIndex, 0, removed);
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Reordered workspace from ${fromIndex} to ${toIndex}`);
+        return true;
+    }
 }

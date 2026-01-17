@@ -31,6 +31,9 @@ interface TestConfig {
     createWorkspace: boolean; // Create a new workspace
     deleteWorkspace: boolean; // Delete a workspace
     setActiveWorkspace: boolean; // Set active workspace
+    reorderWorkspaces: boolean; // Reorder workspaces
+    reorderFrom: number | null; // From index for reorder
+    reorderTo: number | null;   // To index for reorder
     setProject: boolean;      // Set current project path
     projectPath: string | null;  // Project path for project:set
     listTasks: boolean;       // List all tasks
@@ -38,6 +41,11 @@ interface TestConfig {
     getConfig: boolean;       // Get orchestrator config
     imagePath: string | null; // Path to image to attach
     supervisorChat: boolean;  // Use supervisor chat (supervisor:chat:message)
+    // Archived task operations
+    listArchivedTasks: boolean;  // List all archived tasks
+    restoreArchivedTask: boolean;  // Restore an archived task
+    deleteArchivedTask: boolean;   // Delete an archived task permanently
+    watchTask: boolean;           // Watch task state changes
 }
 
 class TestCLI {
@@ -45,6 +53,7 @@ class TestCLI {
     private config: TestConfig;
     private chatMessages: ChatMessage[] = [];
     private tasks: Map<string, Task> = new Map();
+    private archivedTasks: Task[] = [];
     private startTime: number = 0;
     private completionTimer: NodeJS.Timeout | null = null;
     private lastActivityTime: number = 0;
@@ -115,6 +124,9 @@ class TestCLI {
                 } else if (this.config.setActiveWorkspace && this.config.workspaceId) {
                     this.sendSetActiveWorkspace(this.config.workspaceId);
                     setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.reorderWorkspaces && this.config.reorderFrom !== null && this.config.reorderTo !== null) {
+                    this.sendReorderWorkspaces(this.config.reorderFrom, this.config.reorderTo);
+                    setTimeout(() => this.cleanup(), 2000);
                 } else if (this.config.setProject && this.config.projectPath) {
                     this.sendSetProject(this.config.projectPath);
                     setTimeout(() => this.cleanup(), 1000);
@@ -148,6 +160,21 @@ class TestCLI {
                 } else if (this.config.supervisorChat) {
                     // Use supervisor chat
                     this.sendSupervisorChat(this.config.testMessage, this.config.taskId || undefined);
+                } else if (this.config.listArchivedTasks) {
+                    // List archived tasks
+                    this.sendListArchivedTasks();
+                } else if (this.config.restoreArchivedTask && this.config.taskId) {
+                    // Restore archived task
+                    this.sendRestoreArchivedTask(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.deleteArchivedTask && this.config.taskId) {
+                    // Delete archived task permanently
+                    this.sendDeleteArchivedTask(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.watchTask) {
+                    // Watch task state changes - don't auto-close
+                    console.log('👁️  Watching task state changes... (Ctrl+C to exit)');
+                    console.log('');
                 } else {
                     this.sendMessage(this.config.testMessage, this.config.imagePath || undefined);
                 }
@@ -429,6 +456,21 @@ class TestCLI {
         this.ws.send(JSON.stringify(message));
     }
 
+    private sendReorderWorkspaces(fromIndex: number, toIndex: number): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot reorder workspaces: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'workspace:reorder',
+            payload: { fromIndex, toIndex }
+        };
+
+        console.log(`🔄 Reordering workspaces: ${fromIndex} -> ${toIndex}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
     private sendSetProject(path: string): void {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             console.error('Cannot set project: WebSocket not connected');
@@ -441,6 +483,51 @@ class TestCLI {
         };
 
         console.log(`📂 Setting project path to: ${path}`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendListArchivedTasks(): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot list archived tasks: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:archived:list',
+            payload: {}
+        };
+
+        console.log('📦 Requesting archived tasks...');
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendRestoreArchivedTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot restore archived task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:archived:restore',
+            payload: { taskId }
+        };
+
+        console.log(`♻️  Restoring archived task ${taskId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendDeleteArchivedTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot delete archived task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:archived:delete',
+            payload: { taskId }
+        };
+
+        console.log(`🗑️  Permanently deleting archived task ${taskId}...`);
         this.ws.send(JSON.stringify(message));
     }
 
@@ -615,6 +702,22 @@ class TestCLI {
                 }
                 break;
 
+            case 'task:archived:list':
+                this.handleArchivedTaskList(message.payload as { tasks: Task[] });
+                break;
+
+            case 'task:archived:restored':
+                this.handleArchivedTaskRestored(message.payload as { task: Task });
+                break;
+
+            case 'task:archived:deleted':
+                this.handleArchivedTaskDeleted(message.payload as { taskId: string; success: boolean });
+                break;
+
+            case 'task:stateChanged':
+                this.handleTaskStateChanged(message.payload as { task: Task });
+                break;
+
             default:
                 if (this.config.verbose) {
                     const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
@@ -740,6 +843,76 @@ class TestCLI {
         this.scheduleCompletionCheck();
     }
 
+    private handleArchivedTaskList(payload: { tasks: Task[] }): void {
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        this.archivedTasks = payload.tasks || [];
+        console.log(`[${elapsed}s] ARCHIVED  │ Received ${this.archivedTasks.length} archived tasks`);
+
+        // Print the list
+        console.log('');
+        console.log('📦 ARCHIVED TASKS');
+        console.log('='.repeat(80));
+
+        if (this.archivedTasks.length === 0) {
+            console.log('  No archived tasks found');
+        } else {
+            this.archivedTasks.forEach(task => {
+                const archivedDate = new Date(task.lastActivity).toLocaleDateString();
+                const prompt = (task.prompt || '').substring(0, 50) + (task.prompt && task.prompt.length > 50 ? '...' : '');
+                console.log(`  📦 [${task.id.substring(0, 12)}...] ${prompt}`);
+                console.log(`     Workspace: ${task.workspaceId}`);
+                console.log(`     Archived: ${archivedDate}`);
+                console.log('');
+            });
+        }
+
+        // Close connection after listing
+        setTimeout(() => this.cleanup(), 1000);
+    }
+
+    private handleArchivedTaskRestored(payload: { task: Task }): void {
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        const task = payload.task;
+        console.log(`[${elapsed}s] RESTORED  │ Task ${task.id} restored successfully`);
+        console.log(`     Prompt: ${task.prompt?.substring(0, 50)}...`);
+        console.log(`     State: ${task.state}`);
+    }
+
+    private handleArchivedTaskDeleted(payload: { taskId: string; success: boolean }): void {
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        if (payload.success) {
+            console.log(`[${elapsed}s] DELETED   │ Archived task ${payload.taskId} permanently deleted`);
+        } else {
+            console.log(`[${elapsed}s] ERROR     │ Failed to delete archived task ${payload.taskId}`);
+        }
+    }
+
+    private handleTaskStateChanged(payload: { task: Task }): void {
+        const task = payload.task;
+        this.tasks.set(task.id, task);
+
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+
+        // State icons
+        const stateIcon: Record<string, string> = {
+            'busy': '🔄',
+            'idle': '✅',
+            'waiting_input': '❓',
+            'exited': '🛑',
+            'disconnected': '🔌',
+            'interrupted': '⚡',
+            'archived': '📦'
+        };
+        const icon = stateIcon[task.state] || '❔';
+
+        // Show state change prominently
+        const shortId = task.id.substring(0, 12);
+        const waitingType = task.waitingInputType ? ` (${task.waitingInputType})` : '';
+        console.log(`[${elapsed}s] STATE     │ ${icon} ${shortId}... → ${task.state}${waitingType}`);
+
+        this.lastActivityTime = Date.now();
+    }
+
     /**
      * Schedule a completion check after activity stops
      */
@@ -861,6 +1034,9 @@ function parseArgs(): TestConfig {
     let createWorkspace = false;
     let deleteWorkspace = false;
     let setActiveWorkspace = false;
+    let reorderWorkspaces = false;
+    let reorderFrom: number | null = null;
+    let reorderTo: number | null = null;
     let setProject = false;
     let projectPath: string | null = null;
     let listTasks = false;
@@ -868,6 +1044,10 @@ function parseArgs(): TestConfig {
     let getConfig = false;
     let imagePath: string | null = null;
     let supervisorChat = false;
+    let listArchivedTasks = false;
+    let restoreArchivedTask = false;
+    let deleteArchivedTask = false;
+    let watchTask = false;
 
     for (let i = 0; i < args.length; i++) {
         switch (args[i]) {
@@ -937,6 +1117,15 @@ function parseArgs(): TestConfig {
             case '--set-active-workspace':
                 setActiveWorkspace = true;
                 break;
+            case '--reorder-workspaces':
+                reorderWorkspaces = true;
+                break;
+            case '--reorder-from':
+                reorderFrom = parseInt(args[++i], 10);
+                break;
+            case '--reorder-to':
+                reorderTo = parseInt(args[++i], 10);
+                break;
             case '--set-project':
                 setProject = true;
                 break;
@@ -960,6 +1149,15 @@ function parseArgs(): TestConfig {
             case '--supervisor-chat':
             case '-s':
                 supervisorChat = true;
+                break;
+            case '--list-archived':
+                listArchivedTasks = true;
+                break;
+            case '--restore-archived':
+                restoreArchivedTask = true;
+                break;
+            case '--delete-archived':
+                deleteArchivedTask = true;
                 break;
             case '--help':
             case '-h':
@@ -988,6 +1186,11 @@ TASK OPERATIONS:
   --clear-tasks            Clear all tasks
   --list-tasks             List all tasks with their status
   --view-files             View code files for a task (requires --task-id)
+
+ARCHIVED TASK OPERATIONS:
+  --list-archived          List all archived tasks
+  --restore-archived       Restore an archived task (requires --task-id)
+  --delete-archived        Permanently delete an archived task (requires --task-id)
 
 WORKSPACE OPERATIONS:
   --workspace, -w <id>     Workspace ID to use for task creation
@@ -1055,6 +1258,15 @@ Examples:
 
   # Clear all tasks
   npx tsx test-cli.ts --clear-tasks
+
+  # List archived tasks
+  npx tsx test-cli.ts --list-archived
+
+  # Restore an archived task
+  npx tsx test-cli.ts --restore-archived --task-id task-123456
+
+  # Delete an archived task permanently
+  npx tsx test-cli.ts --delete-archived --task-id task-123456
                 `);
                 process.exit(0);
         }
@@ -1081,13 +1293,19 @@ Examples:
         createWorkspace,
         deleteWorkspace,
         setActiveWorkspace,
+        reorderWorkspaces,
+        reorderFrom,
+        reorderTo,
         setProject,
         projectPath,
         listTasks,
         viewTaskFiles,
         getConfig,
         imagePath,
-        supervisorChat
+        supervisorChat,
+        listArchivedTasks,
+        restoreArchivedTask,
+        deleteArchivedTask
     };
 }
 

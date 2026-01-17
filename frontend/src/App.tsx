@@ -8,7 +8,7 @@ import { GlobalVoiceManager } from './components/GlobalVoiceManager';
 import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
@@ -19,18 +19,21 @@ const DEFAULT_CHAT_PANEL_WIDTH = 380;
 function App() {
     const {
         createTask,
-        destroyTask,
         interruptTask,
         archiveTask,
         revertTask,
         createWorkspace,
         deleteWorkspace,
+        reorderWorkspaces,
         sendChatMessage,
         clearChatHistory,
+        requestArchivedTasks,
+        restoreArchivedTask,
+        deleteArchivedTask,
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, supervisorEnabled, aiCoreConfigured } = useTaskStore();
+    const { selectedTaskId, tasks, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
 
     const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -127,12 +130,12 @@ function App() {
         useTaskStore.getState().selectTask(taskId);
 
         // Dispatch scroll-to-bottom event for the task's terminal
-        // Use setTimeout to ensure the terminal has time to mount/update
+        // Use setTimeout to ensure the terminal has time to mount/update and receive history
         setTimeout(() => {
             window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
                 detail: { taskId }
             }));
-        }, 100);
+        }, 300);
     };
 
     // Count unread messages indicator
@@ -220,14 +223,18 @@ function App() {
                     style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}
                 >
                     <WorkspacePanel
-                        onDeleteTask={destroyTask}
+                        onDeleteTask={archiveTask}
                         onInterruptTask={interruptTask}
                         onArchiveTask={archiveTask}
                         onRevertTask={revertTask}
                         onCreateWorkspace={createWorkspace}
                         onDeleteWorkspace={deleteWorkspace}
+                        onReorderWorkspaces={reorderWorkspaces}
                         onCreateTask={createTask}
                         onSelectTask={handleSelectTask}
+                        onRequestArchivedTasks={requestArchivedTasks}
+                        onRestoreArchivedTask={restoreArchivedTask}
+                        onDeleteArchivedTask={deleteArchivedTask}
                     />
                 </aside>
 
@@ -284,8 +291,19 @@ function App() {
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
             <GlobalVoiceManager />
 
+            {/* Offline warning overlay */}
+            {isOffline && (
+                <div className="server-reload-overlay offline-warning">
+                    <div className="server-reload-content">
+                        <WifiOff size={32} />
+                        <span>No internet connection</span>
+                        <p className="offline-hint">Please check your network connection and try again</p>
+                    </div>
+                </div>
+            )}
+
             {/* Server reloading overlay */}
-            {(isServerReloading || !isConnected) && (
+            {!isOffline && (isServerReloading || !isConnected) && (
                 <div className="server-reload-overlay">
                     <div className="server-reload-content">
                         <RefreshCw className="spinning" size={32} />

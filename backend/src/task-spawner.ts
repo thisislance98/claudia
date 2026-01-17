@@ -60,21 +60,22 @@ interface InternalTask extends Task {
     promptSubmitAttempts?: number;
     gitStateBefore?: Partial<TaskGitState>;
     systemPrompt?: string;
+    lastOutputLength: number; // Track output size for state polling
 }
 
 /**
  * TaskSpawner - Manages Claude Code CLI instances
  *
- * State management is simple:
- * - Task created → busy
- * - PreToolUse hook → busy
- * - Stop hook → idle
+ * State management (polling-based detection):
+ * - Polls every 3 seconds to check if output has changed
+ * - Output changed since last check → busy
+ * - Output stable → idle OR waiting_input (via output parsing)
  * - Process exit → exited
  */
 export class TaskSpawner extends EventEmitter {
     private tasks: Map<string, InternalTask> = new Map();
     private disconnectedTasks: Map<string, PersistedTask> = new Map();
-    private sessionToTaskId: Map<string, string> = new Map();
+    private archivedTasks: Map<string, PersistedTask> = new Map();
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
     private configStore: ConfigStore | null = null;
@@ -82,15 +83,78 @@ export class TaskSpawner extends EventEmitter {
     private autoReconnectPromise: Promise<void> | null = null;
     private isReconnecting: boolean = false;
 
+    // State polling (replaces hooks and output-based streaming detection)
+    private statePollingInterval: NodeJS.Timeout | null = null;
+    private static readonly STATE_POLLING_MS = 3000; // Poll every 3 seconds
+
     constructor(persistencePath?: string, autoReconnect: boolean = true, configStore?: ConfigStore) {
         super();
         this.persistencePath = persistencePath || DEFAULT_PERSISTENCE_PATH;
         this.configStore = configStore || null;
         this.loadPersistedTasks();
 
+        // Start state polling
+        this.startStatePolling();
+
         if (autoReconnect && this.disconnectedTasks.size > 0) {
             // Start auto-reconnect immediately but track the promise
             this.autoReconnectPromise = this.autoReconnectTasks();
+        }
+    }
+
+    /**
+     * Start polling to check task states every 3 seconds
+     */
+    private startStatePolling(): void {
+        if (this.statePollingInterval) return;
+
+        this.statePollingInterval = setInterval(() => {
+            this.checkTaskStates();
+        }, TaskSpawner.STATE_POLLING_MS);
+
+        console.log(`[TaskSpawner] State polling started (every ${TaskSpawner.STATE_POLLING_MS}ms)`);
+    }
+
+    /**
+     * Check all tasks for state changes based on output changes
+     */
+    private checkTaskStates(): void {
+        for (const task of this.tasks.values()) {
+            if (task.state === 'exited') continue;
+
+            const currentLength = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
+            const outputChanged = currentLength !== task.lastOutputLength;
+            task.lastOutputLength = currentLength;
+
+            if (outputChanged) {
+                // Output is changing → busy
+                if (task.state !== 'busy') {
+                    console.log(`[TaskSpawner] Polling: task ${task.id} → busy (output changed)`);
+                    task.state = 'busy';
+                    task.waitingInputType = undefined;
+                    this.emit('taskStateChanged', this.toPublicTask(task));
+                }
+            } else {
+                // Output stable → check if idle or waiting_input
+                if (task.state === 'busy') {
+                    const recentOutput = this.getRecentOutput(task, 2048);
+                    const inputType = this.detectWaitingForInput(recentOutput);
+
+                    if (inputType) {
+                        console.log(`[TaskSpawner] Polling: task ${task.id} → waiting_input (${inputType})`);
+                        task.state = 'waiting_input';
+                        task.waitingInputType = inputType;
+                        this.emit('taskStateChanged', this.toPublicTask(task));
+                        this.emit('taskWaitingInput', task.id, inputType, recentOutput);
+                    } else {
+                        console.log(`[TaskSpawner] Polling: task ${task.id} → idle`);
+                        task.state = 'idle';
+                        task.waitingInputType = undefined;
+                        this.captureGitStateAfterTask(task.id);
+                        this.emit('taskStateChanged', this.toPublicTask(task));
+                    }
+                }
+            }
         }
     }
 
@@ -188,6 +252,14 @@ export class TaskSpawner extends EventEmitter {
                 for (const persisted of persistence.tasks) {
                     this.disconnectedTasks.set(persisted.id, persisted);
                 }
+
+                // Load archived tasks
+                if (persistence.archivedTasks) {
+                    console.log(`[TaskSpawner] Loading ${persistence.archivedTasks.length} archived tasks`);
+                    for (const archived of persistence.archivedTasks) {
+                        this.archivedTasks.set(archived.id, archived);
+                    }
+                }
             }
         } catch (error) {
             console.error('[TaskSpawner] Failed to load persisted tasks:', error);
@@ -236,14 +308,20 @@ export class TaskSpawner extends EventEmitter {
                 tasksToSave.push(task);
             }
 
-            const persistence: TaskPersistence = { tasks: tasksToSave };
+            // Convert archived tasks Map to array for persistence
+            const archivedTasksToSave: PersistedTask[] = Array.from(this.archivedTasks.values());
+
+            const persistence: TaskPersistence = {
+                tasks: tasksToSave,
+                archivedTasks: archivedTasksToSave
+            };
             const dir = dirname(this.persistencePath);
             if (!existsSync(dir)) {
                 mkdirSync(dir, { recursive: true });
             }
 
             writeFileSync(this.persistencePath, JSON.stringify(persistence, null, 2));
-            console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks`);
+            console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived`);
         } catch (error) {
             console.error('[TaskSpawner] Failed to save tasks:', error);
         }
@@ -259,119 +337,6 @@ export class TaskSpawner extends EventEmitter {
             if (match) return match[1];
         }
         return null;
-    }
-
-    /**
-     * Called when PreToolUse hook fires → set to busy
-     */
-    handleBusyHook(sessionId: string, toolName?: string): void {
-        const taskId = this.sessionToTaskId.get(sessionId);
-        if (taskId) {
-            const task = this.tasks.get(taskId);
-            if (task && task.state !== 'busy') {
-                console.log(`[TaskSpawner] Busy hook: task ${taskId} → busy (tool=${toolName || 'unknown'})`);
-                task.state = 'busy';
-                task.waitingInputType = undefined; // Clear waiting input state
-                this.emit('taskStateChanged', this.toPublicTask(task));
-            }
-        } else {
-            // Try to find a non-busy task to associate
-            console.log(`[TaskSpawner] Busy hook for unknown session ${sessionId}`);
-            for (const task of this.tasks.values()) {
-                if (task.state === 'idle' || task.state === 'waiting_input') {
-                    console.log(`[TaskSpawner] Associating session ${sessionId} with task ${task.id}`);
-                    if (!task.sessionId) {
-                        task.sessionId = sessionId;
-                        this.sessionToTaskId.set(sessionId, task.id);
-                        this.scheduleSave();
-                    }
-                    task.state = 'busy';
-                    task.waitingInputType = undefined; // Clear waiting input state
-                    this.emit('taskStateChanged', this.toPublicTask(task));
-                    break;
-                }
-            }
-        }
-    }
-
-    /**
-     * Called when Stop hook fires → check if waiting for input, else set to idle
-     */
-    handleStopHook(sessionId: string): void {
-        const taskId = this.sessionToTaskId.get(sessionId);
-        if (taskId) {
-            const task = this.tasks.get(taskId);
-            if (task) {
-                if (!task.sessionId) {
-                    task.sessionId = sessionId;
-                    this.scheduleSave();
-                }
-
-                // Check if Claude is asking a question before marking as idle
-                const recentOutput = this.getRecentOutput(task, 2048);
-                const inputType = this.detectWaitingForInput(recentOutput);
-
-                if (inputType) {
-                    console.log(`[TaskSpawner] Stop hook: task ${taskId} → waiting_input (${inputType})`);
-                    task.state = 'waiting_input';
-                    task.waitingInputType = inputType;
-                    this.emit('taskStateChanged', this.toPublicTask(task));
-                    this.emit('taskWaitingInput', task.id, inputType, recentOutput);
-                } else {
-                    console.log(`[TaskSpawner] Stop hook: task ${taskId} → idle`);
-                    task.state = 'idle';
-                    task.waitingInputType = undefined;
-                    // Capture git state when task becomes idle (task finished doing work)
-                    this.captureGitStateAfterTask(taskId);
-                    this.emit('taskStateChanged', this.toPublicTask(task));
-                }
-            }
-        } else {
-            // Fallback: mark any busy task as idle/waiting_input
-            console.log(`[TaskSpawner] Stop hook for unknown session ${sessionId}`);
-            for (const task of this.tasks.values()) {
-                if (task.state === 'busy') {
-                    if (!task.sessionId) {
-                        task.sessionId = sessionId;
-                        this.sessionToTaskId.set(sessionId, task.id);
-                        this.scheduleSave();
-                    }
-
-                    // Check if Claude is asking a question
-                    const recentOutput = this.getRecentOutput(task, 2048);
-                    const inputType = this.detectWaitingForInput(recentOutput);
-
-                    if (inputType) {
-                        console.log(`[TaskSpawner] Stop hook: task ${task.id} → waiting_input (${inputType})`);
-                        task.state = 'waiting_input';
-                        task.waitingInputType = inputType;
-                        this.emit('taskStateChanged', this.toPublicTask(task));
-                        this.emit('taskWaitingInput', task.id, inputType, recentOutput);
-                    } else {
-                        task.state = 'idle';
-                        task.waitingInputType = undefined;
-                        // Capture git state when task becomes idle
-                        this.captureGitStateAfterTask(task.id);
-                        this.emit('taskStateChanged', this.toPublicTask(task));
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Called when Notification hook fires (kept for compatibility but doesn't change state)
-     */
-    handleNotificationHook(sessionId: string, notificationType: string): void {
-        console.log(`[TaskSpawner] Notification hook: ${notificationType} for session ${sessionId} (ignored)`);
-    }
-
-    registerSession(taskId: string, sessionId: string): void {
-        this.sessionToTaskId.set(sessionId, taskId);
-        const task = this.tasks.get(taskId);
-        if (task) {
-            task.sessionId = sessionId;
-        }
     }
 
     private workspaceToClaudeFolder(workspacePath: string): string {
@@ -478,6 +443,15 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Public method for debugging output detection
+     */
+    getRecentOutputForDebug(taskId: string, maxBytes: number): string {
+        const task = this.tasks.get(taskId);
+        if (!task) return '';
+        return this.getRecentOutput(task, maxBytes);
+    }
+
+    /**
      * Detect if Claude Code is actively asking the user a question
      * Only returns a type if Claude is genuinely asking something
      * Returns null for normal idle state (waiting for next command)
@@ -499,35 +473,67 @@ export class TaskSpawner extends EventEmitter {
             return 'confirmation';
         }
 
-        // Check if Claude asked a question anywhere in recent output
-        // Exclude known non-question patterns
-        const cleanStr = str
-            .replace(/\? for shortcuts/g, '')
-            .replace(/Try "[^"]*"/g, '')
-            .replace(/\/model to try/g, '');
+        // Get the last section of output (separated by ⏺ dots or horizontal lines)
+        // Claude separates messages with ⏺ or ─── lines
+        const sections = str.split(/(?:⏺|─{3,})/);
+        const lastSection = sections.length > 0 ? sections[sections.length - 1] : str;
+
+        // Clean up the section for analysis
+        const cleanSection = lastSection
+            .replace(/\? for shortcuts/g, '')  // Help text
+            .replace(/Try "[^"]*"/g, '')       // Suggestion text
+            .replace(/\/model to try/g, '')    // Model switcher text
+            .replace(/bypass permissions/gi, '') // Permission mode text
+            .replace(/shift\+tab to cycle/gi, ''); // Keyboard hint
 
         // Look for question marks that indicate real questions
-        const questionMatch = cleanStr.match(/[^.!]\?/);  // ? not after . or !
-        if (questionMatch) {
-            // Verify it's a real question by checking for question words nearby
-            const hasQuestionPattern =
-                cleanStr.includes('What ') ||
-                cleanStr.includes('Which ') ||
-                cleanStr.includes('How ') ||
-                cleanStr.includes('Where ') ||
-                cleanStr.includes('When ') ||
-                cleanStr.includes('Why ') ||
-                cleanStr.includes('Who ') ||
-                cleanStr.includes('Would you') ||
-                cleanStr.includes('Could you') ||
-                cleanStr.includes('Do you') ||
-                cleanStr.includes('Should ') ||
-                cleanStr.includes('Can you') ||
-                cleanStr.includes('Let me know') ||
-                cleanStr.includes('give me') ||
-                cleanStr.includes('tell me');
+        const hasQuestionMark = cleanSection.includes('?');
 
-            if (hasQuestionPattern) {
+        if (hasQuestionMark) {
+            // Verify it's a real question by checking for question patterns
+            const questionPatterns = [
+                /\bwhat\b/i,
+                /\bwhich\b/i,
+                /\bhow\b/i,
+                /\bwhere\b/i,
+                /\bwhen\b/i,
+                /\bwhy\b/i,
+                /\bwho\b/i,
+                /\bwould you\b/i,
+                /\bcould you\b/i,
+                /\bdo you\b/i,
+                /\bshould\b/i,
+                /\bcan you\b/i,
+                /\blet me know\b/i,
+                /\bgive me\b/i,
+                /\btell me\b/i,
+                /\bprefer\b/i,
+                /\blike to\b/i,
+                /\bwant to\b/i,
+                /\bchoose\b/i,
+                /\bselect\b/i,
+                /\bpick\b/i,
+                /\bdecide\b/i,
+                /\bconfirm\b/i,
+                /\bproceed\b/i,
+                /\bcontinue\b/i,
+                /\bapproach\b/i,
+                /\boption/i,
+                /\balternative/i,
+            ];
+
+            for (const pattern of questionPatterns) {
+                if (pattern.test(cleanSection)) {
+                    console.log(`[TaskSpawner] Question detected in last section: "${cleanSection.slice(0, 100)}..."`);
+                    return 'question';
+                }
+            }
+
+            // Also check if the last section ends with a question (even without explicit patterns)
+            // This catches cases like "Is this what you wanted?"
+            const trimmedSection = cleanSection.trim();
+            if (trimmedSection.endsWith('?') && trimmedSection.length > 10) {
+                console.log(`[TaskSpawner] Question detected (ends with ?): "${trimmedSection.slice(-80)}"`);
                 return 'question';
             }
         }
@@ -536,88 +542,15 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
-     * Detect if Claude is actively busy by checking for busy indicators in output.
-     * Claude shows "ctrl+c to interrupt" when it's processing.
-     * This is a fallback when hooks don't fire reliably.
+     * Get the current state of a task.
+     * Simply returns the stored state - polling manages state transitions.
      */
-    detectBusyFromOutput(taskId: string): boolean {
-        const task = this.tasks.get(taskId);
-        if (!task) return false;
-
-        // Get recent output (last 4KB should be enough to check)
-        const recentOutput = this.getRecentOutput(task, 4096).toLowerCase();
-
-        // Pattern that indicates Claude is actively processing
-        // The terminal shows "ctrl+c to interrupt" while Claude is working
-        const busyIndicators = [
-            'ctrl+c to interrupt',
-            'ctrl-c to interrupt',
-            '⏳', // spinner/loading indicators
-            'thinking',
-        ];
-
-        for (const indicator of busyIndicators) {
-            if (recentOutput.includes(indicator)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Get the actual state by combining stored state with output-based detection.
-     * This helps when hooks miss state transitions.
-     * Also updates the internal state when detection corrects it.
-     */
-    getActualTaskState(taskId: string): TaskState | null {
+    getTaskState(taskId: string): TaskState | null {
         const task = this.tasks.get(taskId);
         if (!task) {
             const disconnected = this.disconnectedTasks.get(taskId);
             return disconnected ? 'disconnected' : null;
         }
-
-        // If task is already exited or disconnected, trust that
-        if (task.state === 'exited' || task.state === 'disconnected') {
-            return task.state;
-        }
-
-        // Use output-based detection for busy state
-        const isBusyFromOutput = this.detectBusyFromOutput(taskId);
-
-        if (isBusyFromOutput) {
-            // Output says busy, so it's busy
-            if (task.state !== 'busy') {
-                console.log(`[TaskSpawner] Output-based detection: task ${taskId} appears busy (was ${task.state})`);
-                task.state = 'busy';
-                this.emit('taskStateChanged', this.toPublicTask(task));
-            }
-            return 'busy';
-        }
-
-        // If output doesn't show busy indicators, check for waiting input
-        if (task.state === 'busy') {
-            // Hooks might have missed the stop - check if waiting for input
-            const recentOutput = this.getRecentOutput(task, 2048);
-            const inputType = this.detectWaitingForInput(recentOutput);
-            if (inputType) {
-                console.log(`[TaskSpawner] Output-based detection: task ${taskId} waiting for ${inputType}`);
-                task.state = 'waiting_input';
-                task.waitingInputType = inputType;
-                this.emit('taskStateChanged', this.toPublicTask(task));
-                this.emit('taskWaitingInput', task.id, inputType, recentOutput);
-                return 'waiting_input';
-            }
-            // If not busy indicators and not waiting for input, likely idle
-            console.log(`[TaskSpawner] Output-based detection: task ${taskId} appears idle (was busy)`);
-            task.state = 'idle';
-            task.waitingInputType = undefined;
-            this.captureGitStateAfterTask(taskId);
-            this.emit('taskStateChanged', this.toPublicTask(task));
-            return 'idle';
-        }
-
-        // Return the stored state
         return task.state;
     }
 
@@ -667,32 +600,6 @@ export class TaskSpawner extends EventEmitter {
         }, 800);
     }
 
-    private getHookSettings(): string {
-        const hooksDir = join(__dirname, '..', 'hooks');
-        const stopHook = process.env['CC_HOOK_SCRIPT'] || join(hooksDir, 'stop-notify.sh');
-        const preToolUseHook = join(hooksDir, 'pre-tool-use.sh');
-
-        const settings = {
-            hooks: {
-                PreToolUse: [{
-                    hooks: [{
-                        type: "command",
-                        command: preToolUseHook,
-                        timeout: 5
-                    }]
-                }],
-                Stop: [{
-                    hooks: [{
-                        type: "command",
-                        command: stopHook,
-                        timeout: 5
-                    }]
-                }]
-            }
-        };
-        return JSON.stringify(settings);
-    }
-
     async createTask(prompt: string, workspaceId: string, systemPrompt?: string): Promise<Task> {
         const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
@@ -705,8 +612,7 @@ export class TaskSpawner extends EventEmitter {
             ? process.env['CC_CLAUDE_ARGS'].split(' ')
             : [];
 
-        const hookSettings = this.getHookSettings();
-        const claudeArgs = [...customArgs, '--settings', hookSettings];
+        const claudeArgs = [...customArgs];
 
         if (this.configStore?.getSkipPermissions()) {
             claudeArgs.push('--dangerously-skip-permissions');
@@ -746,6 +652,7 @@ export class TaskSpawner extends EventEmitter {
             sessionId: null,
             gitStateBefore: gitStateBefore || undefined,
             systemPrompt: systemPrompt?.trim() || undefined,
+            lastOutputLength: 0,  // Initialize for state polling
         };
 
         this.setupProcessHandlers(task);
@@ -779,7 +686,6 @@ export class TaskSpawner extends EventEmitter {
                 if (sessionId) {
                     console.log(`[TaskSpawner] Found session ID: ${sessionId}`);
                     task.sessionId = sessionId;
-                    this.sessionToTaskId.set(sessionId, task.id);
                 }
             }
 
@@ -794,18 +700,7 @@ export class TaskSpawner extends EventEmitter {
                 setTimeout(() => this.sendPromptWithRetry(task, prompt), 1200);
             }
 
-            // Detect if Claude is waiting for user input
-            // Check the recent output (last ~2KB) for input patterns
-            const recentOutput = this.getRecentOutput(task, 2048);
-            const inputType = this.detectWaitingForInput(recentOutput);
-
-            if (inputType && task.state !== 'waiting_input') {
-                console.log(`[TaskSpawner] Task ${task.id} waiting for input: ${inputType}`);
-                task.state = 'waiting_input';
-                task.waitingInputType = inputType;
-                this.emit('taskStateChanged', this.toPublicTask(task));
-                this.emit('taskWaitingInput', task.id, inputType, recentOutput);
-            }
+            // Note: State detection is now handled by polling in checkTaskStates()
 
             // Stream output to active task
             if (task.isActive) {
@@ -969,15 +864,56 @@ export class TaskSpawner extends EventEmitter {
     writeToTask(taskId: string, data: string): void {
         const task = this.tasks.get(taskId);
         if (task) {
-            // User sending input → mark as busy (from idle or waiting_input)
-            const isEnterKey = data === '\r' || data === '\n' || data.includes('\r');
-            if ((task.state === 'idle' || task.state === 'waiting_input') && isEnterKey) {
-                task.state = 'busy';
-                task.waitingInputType = undefined;
-                this.emit('taskStateChanged', this.toPublicTask(task));
+            // Check if this is a message with Enter at the end (from input bar)
+            const endsWithEnter = data.endsWith('\r') || data.endsWith('\n');
+            const hasMessageContent = data.length > 1 && endsWithEnter;
+
+            if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input')) {
+                // Split message from Enter key - write message first, then retry Enter
+                const messageContent = data.slice(0, -1);
+                const enterKey = data.slice(-1);
+
+                console.log(`[TaskSpawner] Writing message to task ${taskId}, will retry Enter if needed`);
+                task.process.write(messageContent);
+                task.promptSubmitAttempts = 0;
+
+                // Use same retry mechanism as initial prompt
+                setTimeout(() => this.sendEnterWithRetryForInput(task, enterKey, 3), 200);
+            } else {
+                // Single keypress or task is busy - write directly
+                task.process.write(data);
             }
-            task.process.write(data);
         }
+    }
+
+    private sendEnterWithRetryForInput(task: InternalTask, enterKey: string, retriesLeft: number): void {
+        if (retriesLeft <= 0) {
+            console.log(`[TaskSpawner] Max input retries reached for task ${task.id}`);
+            return;
+        }
+
+        task.promptSubmitAttempts = (task.promptSubmitAttempts || 0) + 1;
+        console.log(`[TaskSpawner] Sending Enter for input (attempt ${task.promptSubmitAttempts}) to task ${task.id}`);
+
+        // Mark as busy before sending Enter
+        if (task.state === 'idle' || task.state === 'waiting_input') {
+            task.state = 'busy';
+            task.waitingInputType = undefined;
+            this.emit('taskStateChanged', this.toPublicTask(task));
+        }
+
+        task.process.write(enterKey);
+
+        // Check if Claude started processing
+        setTimeout(() => {
+            // If task went back to idle/waiting, the input wasn't processed - retry
+            if (task.state === 'idle' || task.state === 'waiting_input') {
+                console.log(`[TaskSpawner] Claude still idle, retrying Enter for input`);
+                setTimeout(() => this.sendEnterWithRetryForInput(task, enterKey, retriesLeft - 1), 400);
+            } else if (task.state === 'busy') {
+                console.log(`[TaskSpawner] Input accepted, Claude is processing`);
+            }
+        }, 600);
     }
 
     resizeTask(taskId: string, cols: number, rows: number): void {
@@ -1034,14 +970,35 @@ export class TaskSpawner extends EventEmitter {
     }
 
     archiveTask(taskId: string): void {
-        // Archive removes task from active list but keeps it in persistent storage
-        // For now, it behaves the same as destroy - just removes the task
-        // TODO: In the future, could move to an archived state instead of deleting
+        // Archive moves task from active list to archived storage
         let archived = false;
         let wasLive = false;
 
         const task = this.tasks.get(taskId);
         if (task) {
+            // Convert live task to persisted format for archiving
+            const buffers: Buffer[] = [];
+            if (task.previousHistory) {
+                buffers.push(task.previousHistory);
+            }
+            buffers.push(...task.outputHistory);
+            const historyBuffer = Buffer.concat(buffers);
+            const historyBase64 = historyBuffer.toString('base64');
+
+            const archivedTask: PersistedTask = {
+                id: task.id,
+                prompt: task.prompt,
+                workspaceId: task.workspaceId,
+                createdAt: task.createdAt.toISOString(),
+                lastActivity: task.lastActivity.toISOString(),
+                lastState: 'archived',
+                sessionId: task.sessionId,
+                outputHistory: historyBase64,
+                gitState: task.gitState,
+                systemPrompt: task.systemPrompt,
+            };
+            this.archivedTasks.set(taskId, archivedTask);
+
             // Delete from map FIRST to prevent onExit handler from emitting state changes
             this.tasks.delete(taskId);
             try {
@@ -1053,7 +1010,12 @@ export class TaskSpawner extends EventEmitter {
             wasLive = true;
         }
 
-        if (this.disconnectedTasks.has(taskId)) {
+        // Also check disconnected tasks
+        const disconnected = this.disconnectedTasks.get(taskId);
+        if (disconnected) {
+            // Move to archived
+            disconnected.lastState = 'archived';
+            this.archivedTasks.set(taskId, disconnected);
             this.disconnectedTasks.delete(taskId);
             archived = true;
         }
@@ -1062,8 +1024,68 @@ export class TaskSpawner extends EventEmitter {
         if (archived) {
             this.scheduleSave();
             this.emit('taskDestroyed', taskId);
-            console.log(`[TaskSpawner] Archived (destroyed) ${wasLive ? 'live' : 'disconnected'} task ${taskId}`);
+            console.log(`[TaskSpawner] Archived ${wasLive ? 'live' : 'disconnected'} task ${taskId}`);
         }
+    }
+
+    /**
+     * Get all archived tasks
+     */
+    getArchivedTasks(): Task[] {
+        return Array.from(this.archivedTasks.values()).map(persisted => ({
+            id: persisted.id,
+            prompt: persisted.prompt,
+            state: 'archived' as TaskState,
+            workspaceId: persisted.workspaceId,
+            createdAt: new Date(persisted.createdAt),
+            lastActivity: new Date(persisted.lastActivity),
+            gitState: persisted.gitState,
+            systemPrompt: persisted.systemPrompt,
+        }));
+    }
+
+    /**
+     * Restore an archived task back to disconnected state (can then be reconnected)
+     */
+    restoreArchivedTask(taskId: string): Task | null {
+        const archived = this.archivedTasks.get(taskId);
+        if (!archived) {
+            console.log(`[TaskSpawner] Cannot restore: archived task ${taskId} not found`);
+            return null;
+        }
+
+        // Move from archived to disconnected
+        archived.lastState = 'disconnected';
+        this.disconnectedTasks.set(taskId, archived);
+        this.archivedTasks.delete(taskId);
+        this.scheduleSave();
+
+        console.log(`[TaskSpawner] Restored archived task ${taskId} to disconnected state`);
+
+        // Return the task in disconnected format
+        return {
+            id: archived.id,
+            prompt: archived.prompt,
+            state: 'disconnected' as TaskState,
+            workspaceId: archived.workspaceId,
+            createdAt: new Date(archived.createdAt),
+            lastActivity: new Date(archived.lastActivity),
+            gitState: archived.gitState,
+            systemPrompt: archived.systemPrompt,
+        };
+    }
+
+    /**
+     * Permanently delete an archived task
+     */
+    deleteArchivedTask(taskId: string): boolean {
+        if (this.archivedTasks.has(taskId)) {
+            this.archivedTasks.delete(taskId);
+            this.scheduleSave();
+            console.log(`[TaskSpawner] Permanently deleted archived task ${taskId}`);
+            return true;
+        }
+        return false;
     }
 
     getAllTasks(): Task[] {
@@ -1093,8 +1115,7 @@ export class TaskSpawner extends EventEmitter {
             ? process.env['CC_CLAUDE_ARGS'].split(' ')
             : [];
 
-        const hookSettings = this.getHookSettings();
-        const claudeArgs = [...customArgs, '--settings', hookSettings];
+        const claudeArgs = [...customArgs];
 
         if (this.configStore?.getSkipPermissions()) {
             claudeArgs.push('--dangerously-skip-permissions');
@@ -1147,14 +1168,11 @@ export class TaskSpawner extends EventEmitter {
             initialPromptSent: true,
             pendingPrompt: null,
             sessionId: persisted.sessionId,
+            lastOutputLength: resumeMessage.length,  // Initialize for state polling
         };
 
         this.setupProcessHandlers(task);
         this.tasks.set(task.id, task);
-
-        if (persisted.sessionId) {
-            this.sessionToTaskId.set(persisted.sessionId, task.id);
-        }
 
         this.disconnectedTasks.delete(taskId);
         this.scheduleSave();
@@ -1165,6 +1183,12 @@ export class TaskSpawner extends EventEmitter {
 
     destroy(): void {
         this.saveTasks();
+
+        // Clean up all idle timers
+        for (const timer of this.outputIdleTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.outputIdleTimers.clear();
 
         for (const task of this.tasks.values()) {
             try {

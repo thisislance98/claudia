@@ -3,9 +3,13 @@
     {
       "id": "/Users/I850333/projects/experiments/codeui",
       "name": "codeui",
-      "projects": [],
-      "createdAt": "2026-01-11T19:48:46.776Z"
+      "createdAt": "2026-01-16T15:56:14.309Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/Minecraft",
+      "name": "Minecraft",
+      "createdAt": "2026-01-16T04:19:29.587Z"
     }
   ],
-  "activeWorkspaceId": "/Users/I850333/projects/experiments/codeui"
+  "activeWorkspaceId": "/Users/I850333/projects/experiments/Minecraft"
 }

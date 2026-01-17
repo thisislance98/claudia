@@ -62,7 +62,6 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): Router {
 
             // Map external model name to internal
             const internalModel = deploymentCatalog.toInternalModelName(model);
-            console.log(`[AnthropicProxy] Messages request: ${model} → ${internalModel}, stream=${stream}`);
 
             // Get OAuth token
             const accessToken = await tokenProvider.getValidToken();
@@ -140,7 +139,7 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): Router {
                     });
 
                     res.on('close', () => {
-                        console.log('[AnthropicProxy] Client disconnected, cleaning up streams');
+                        // Silently clean up streams on client disconnect (normal behavior)
                         sourceStream.destroy();
                         streamTransformer.destroy();
                     });
