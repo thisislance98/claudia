@@ -53,6 +53,18 @@ export function useVoiceRecognition(options: VoiceRecognitionOptions = {}) {
     // Accumulate final transcript across recognition restarts in continuous mode
     const accumulatedTranscriptRef = useRef('');
 
+    // Use refs for callbacks to avoid recreating recognition when callbacks change
+    const onResultRef = useRef(onResult);
+    const onErrorRef = useRef(onError);
+    const onListeningChangeRef = useRef(onListeningChange);
+
+    // Keep refs up to date
+    useEffect(() => {
+        onResultRef.current = onResult;
+        onErrorRef.current = onError;
+        onListeningChangeRef.current = onListeningChange;
+    }, [onResult, onError, onListeningChange]);
+
     // Check for browser support and initialize
     useEffect(() => {
         const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -98,18 +110,18 @@ export function useVoiceRecognition(options: VoiceRecognitionOptions = {}) {
                     setTranscript(finalText);
                 }
                 setInterimTranscript('');
-                onResult?.(finalText, true);
+                onResultRef.current?.(finalText, true);
             }
 
             if (interimText) {
                 setInterimTranscript(interimText);
-                onResult?.(interimText, false);
+                onResultRef.current?.(interimText, false);
             }
         };
 
         // Handle errors
         recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-            console.log('Speech recognition error:', event.error);
+            console.log('[VoiceRecognition] Error:', event.error, '| shouldBeListening:', shouldBeListeningRef.current);
 
             // 'no-speech' is normal in continuous mode - just means silence
             if (event.error === 'no-speech') {
@@ -123,44 +135,74 @@ export function useVoiceRecognition(options: VoiceRecognitionOptions = {}) {
             }
 
             const errorMessage = getErrorMessage(event.error);
-            onError?.(errorMessage);
+            onErrorRef.current?.(errorMessage);
 
             // Fatal errors - stop completely
             if (event.error === 'not-allowed' || event.error === 'audio-capture') {
+                console.warn('[VoiceRecognition] Fatal error, stopping completely:', event.error);
                 setIsListening(false);
                 shouldBeListeningRef.current = false;
-                onListeningChange?.(false);
+                onListeningChangeRef.current?.(false);
             }
         };
+
+        // Track restart attempts to prevent infinite retry loops
+        let restartAttempts = 0;
+        const maxRestartAttempts = 3;
 
         // Handle end - this is key for continuous mode
         // The Web Speech API stops after detecting silence, even with continuous=true
         // We need to restart it to keep listening
         recognition.onend = () => {
+            console.log('[VoiceRecognition] onend fired | shouldBeListening:', shouldBeListeningRef.current, '| continuous:', continuous);
             setInterimTranscript('');
 
             if (shouldBeListeningRef.current && continuous) {
+                // Reset attempts counter on successful listening session
+                // (if we get here via normal end, not error)
+
                 // Immediately restart for seamless continuous listening
                 try {
+                    console.log('[VoiceRecognition] Restarting... attempt:', restartAttempts + 1);
                     recognition.start();
+                    restartAttempts = 0; // Reset on successful start
                 } catch (e) {
+                    restartAttempts++;
+                    console.warn('[VoiceRecognition] Restart failed, attempt:', restartAttempts, '| error:', e);
+
+                    if (restartAttempts >= maxRestartAttempts) {
+                        console.error('[VoiceRecognition] Max restart attempts reached, giving up');
+                        setIsListening(false);
+                        shouldBeListeningRef.current = false;
+                        onListeningChangeRef.current?.(false);
+                        return;
+                    }
+
                     // Already started or other error - try again shortly
                     setTimeout(() => {
                         if (shouldBeListeningRef.current && recognitionRef.current) {
                             try {
+                                console.log('[VoiceRecognition] Delayed restart attempt:', restartAttempts + 1);
                                 recognitionRef.current.start();
-                            } catch {
-                                // Give up and notify user
-                                setIsListening(false);
-                                shouldBeListeningRef.current = false;
-                                onListeningChange?.(false);
+                                restartAttempts = 0; // Reset on successful start
+                            } catch (retryError) {
+                                restartAttempts++;
+                                console.error('[VoiceRecognition] Delayed restart failed, attempt:', restartAttempts, '| error:', retryError);
+                                if (restartAttempts >= maxRestartAttempts) {
+                                    // Give up and notify user
+                                    console.error('[VoiceRecognition] Max restart attempts reached after delay, giving up');
+                                    setIsListening(false);
+                                    shouldBeListeningRef.current = false;
+                                    onListeningChangeRef.current?.(false);
+                                }
                             }
                         }
                     }, 100);
                 }
             } else {
+                console.log('[VoiceRecognition] Not restarting (shouldBeListening:', shouldBeListeningRef.current, ', continuous:', continuous, ')');
                 setIsListening(false);
-                onListeningChange?.(false);
+                onListeningChangeRef.current?.(false);
             }
         };
 
@@ -175,9 +217,11 @@ export function useVoiceRecognition(options: VoiceRecognitionOptions = {}) {
                 }
             }
         };
-    }, [continuous, interimResults, language, onResult, onError, onListeningChange]);
+    // Only recreate recognition when these config options change, NOT when callbacks change
+    }, [continuous, interimResults, language]);
 
     const startListening = useCallback(() => {
+        console.log('[VoiceRecognition] startListening called | isListening:', isListening, '| hasRecognition:', !!recognitionRef.current);
         if (!recognitionRef.current || isListening) return;
 
         // Reset state
@@ -189,26 +233,29 @@ export function useVoiceRecognition(options: VoiceRecognitionOptions = {}) {
         try {
             recognitionRef.current.start();
             setIsListening(true);
-            onListeningChange?.(true);
+            onListeningChangeRef.current?.(true);
+            console.log('[VoiceRecognition] Started successfully');
         } catch (error) {
-            console.error('Failed to start recognition:', error);
+            console.error('[VoiceRecognition] Failed to start:', error);
             shouldBeListeningRef.current = false;
-            onError?.('Failed to start voice recognition');
+            onErrorRef.current?.('Failed to start voice recognition');
         }
-    }, [isListening, onError, onListeningChange]);
+    }, [isListening]);
 
     const stopListening = useCallback(() => {
+        console.log('[VoiceRecognition] stopListening called | hasRecognition:', !!recognitionRef.current);
         if (!recognitionRef.current) return;
 
         shouldBeListeningRef.current = false;
         try {
             recognitionRef.current.stop();
-        } catch {
-            // Ignore stop errors
+            console.log('[VoiceRecognition] Stopped successfully');
+        } catch (e) {
+            console.warn('[VoiceRecognition] Stop error (usually harmless):', e);
         }
         setIsListening(false);
-        onListeningChange?.(false);
-    }, [onListeningChange]);
+        onListeningChangeRef.current?.(false);
+    }, []);
 
     const resetTranscript = useCallback(() => {
         setTranscript('');

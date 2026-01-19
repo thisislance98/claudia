@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, Cloud, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import './SettingsMenu.css';
@@ -26,6 +26,8 @@ interface AICoreCredentials {
     resourceGroup: string;
     timeoutMs: number;
 }
+
+type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core';
 
 interface CollapsiblePanelProps {
     title: string;
@@ -58,11 +60,11 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         sound: false,
         behavior: false,
+        api: false,
         mcp: false,
         permissions: false,
         rules: false,
-        supervisor: false,
-        aicore: false
+        supervisor: false
     });
 
     // Handle initial panel expansion when settings opens
@@ -83,6 +85,11 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [supervisorPromptSaved, setSupervisorPromptSaved] = useState(true);
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
 
+    // API Mode state
+    const [apiMode, setApiMode] = useState<ApiMode>('default');
+    const [customAnthropicApiKey, setCustomAnthropicApiKey] = useState('');
+    const [apiModeSaved, setApiModeSaved] = useState(true);
+
     // AI Core credentials state
     const [aiCoreCredentials, setAiCoreCredentials] = useState<AICoreCredentials>({
         clientId: '',
@@ -95,6 +102,10 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [aiCoreSaved, setAiCoreSaved] = useState(true);
     const [aiCoreTestStatus, setAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [aiCoreTestMessage, setAiCoreTestMessage] = useState('');
+
+    // Custom API key test state
+    const [customApiKeyTestStatus, setCustomApiKeyTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [customApiKeyTestMessage, setCustomApiKeyTestMessage] = useState('');
 
     useEffect(() => {
         if (isOpen) {
@@ -115,6 +126,9 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 setSupervisorSystemPrompt(config.supervisorSystemPrompt || '');
                 setSupervisorPromptSaved(true);
                 setAutoFocusOnInput(config.autoFocusOnInput || false);
+                setApiMode(config.apiMode || 'default');
+                setCustomAnthropicApiKey(config.customAnthropicApiKey || '');
+                setApiModeSaved(true);
                 if (config.aiCoreCredentials) {
                     setAiCoreCredentials(config.aiCoreCredentials);
                 }
@@ -293,6 +307,77 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
+    const handleApiModeChange = (mode: ApiMode) => {
+        setApiMode(mode);
+        setApiModeSaved(false);
+        // Reset test statuses when mode changes
+        setCustomApiKeyTestStatus('idle');
+        setCustomApiKeyTestMessage('');
+        setAiCoreTestStatus('idle');
+        setAiCoreTestMessage('');
+    };
+
+    const handleCustomApiKeyChange = (key: string) => {
+        setCustomAnthropicApiKey(key);
+        setApiModeSaved(false);
+        setCustomApiKeyTestStatus('idle');
+    };
+
+    const saveApiMode = async () => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    apiMode,
+                    customAnthropicApiKey: apiMode === 'custom-anthropic' ? customAnthropicApiKey : undefined
+                })
+            });
+            if (response.ok) {
+                setApiModeSaved(true);
+            }
+        } catch (error) {
+            console.error('Failed to save API mode:', error);
+        }
+    };
+
+    const testCustomApiKey = async () => {
+        if (!customAnthropicApiKey) return;
+
+        setCustomApiKeyTestStatus('testing');
+        setCustomApiKeyTestMessage('Testing API key...');
+
+        try {
+            // Make a minimal request to Anthropic API to test the key
+            const response = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': customAnthropicApiKey,
+                    'anthropic-version': '2023-06-01',
+                    'anthropic-dangerous-direct-browser-access': 'true'
+                },
+                body: JSON.stringify({
+                    model: 'claude-3-haiku-20240307',
+                    max_tokens: 1,
+                    messages: [{ role: 'user', content: 'Hi' }]
+                })
+            });
+
+            if (response.ok) {
+                setCustomApiKeyTestStatus('success');
+                setCustomApiKeyTestMessage('API key is valid!');
+            } else {
+                const error = await response.json().catch(() => ({}));
+                setCustomApiKeyTestStatus('error');
+                setCustomApiKeyTestMessage(error.error?.message || `Invalid API key (${response.status})`);
+            }
+        } catch (error) {
+            setCustomApiKeyTestStatus('error');
+            setCustomApiKeyTestMessage('Failed to test API key - check your network');
+        }
+    };
+
     const togglePanel = (panel: string) => {
         setExpandedPanels(prev => ({ ...prev, [panel]: !prev[panel] }));
     };
@@ -373,6 +458,229 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     <span className="toggle-slider"></span>
                                 </label>
                             </div>
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
+                        title="API Configuration"
+                        icon={<Key size={18} />}
+                        isExpanded={expandedPanels.api}
+                        onToggle={() => togglePanel('api')}
+                    >
+                        <div className="api-config-content">
+                            <p className="api-config-description">
+                                Choose how Claude Code connects to Claude models.
+                            </p>
+
+                            <div className="api-mode-selector">
+                                <label className={`api-mode-option ${apiMode === 'default' ? 'selected' : ''}`}>
+                                    <input
+                                        type="radio"
+                                        name="apiMode"
+                                        value="default"
+                                        checked={apiMode === 'default'}
+                                        onChange={() => handleApiModeChange('default')}
+                                    />
+                                    <div className="api-mode-content">
+                                        <span className="api-mode-title">Default Claude Code</span>
+                                        <span className="api-mode-description">
+                                            Use your existing Claude Code subscription (requires claude login)
+                                        </span>
+                                    </div>
+                                </label>
+
+                                <label className={`api-mode-option ${apiMode === 'custom-anthropic' ? 'selected' : ''}`}>
+                                    <input
+                                        type="radio"
+                                        name="apiMode"
+                                        value="custom-anthropic"
+                                        checked={apiMode === 'custom-anthropic'}
+                                        onChange={() => handleApiModeChange('custom-anthropic')}
+                                    />
+                                    <div className="api-mode-content">
+                                        <span className="api-mode-title">Custom Anthropic API Key</span>
+                                        <span className="api-mode-description">
+                                            Use your own Anthropic API key (pay per use)
+                                        </span>
+                                    </div>
+                                </label>
+
+                                <label className={`api-mode-option ${apiMode === 'sap-ai-core' ? 'selected' : ''}`}>
+                                    <input
+                                        type="radio"
+                                        name="apiMode"
+                                        value="sap-ai-core"
+                                        checked={apiMode === 'sap-ai-core'}
+                                        onChange={() => handleApiModeChange('sap-ai-core')}
+                                    />
+                                    <div className="api-mode-content">
+                                        <span className="api-mode-title">SAP AI Core</span>
+                                        <span className="api-mode-description">
+                                            Use Claude models through your SAP AI Core deployment
+                                        </span>
+                                    </div>
+                                </label>
+                            </div>
+
+                            {/* Custom Anthropic API Key fields */}
+                            {apiMode === 'custom-anthropic' && (
+                                <div className="api-mode-fields">
+                                    <div className="aicore-field">
+                                        <label>Anthropic API Key</label>
+                                        <input
+                                            type="password"
+                                            value={customAnthropicApiKey}
+                                            onChange={(e) => handleCustomApiKeyChange(e.target.value)}
+                                            placeholder="sk-ant-api03-..."
+                                            className="aicore-input"
+                                        />
+                                    </div>
+
+                                    {customApiKeyTestStatus !== 'idle' && (
+                                        <div className={`aicore-test-result ${customApiKeyTestStatus}`}>
+                                            {customApiKeyTestStatus === 'testing' && <Loader2 size={16} className="spinning" />}
+                                            {customApiKeyTestStatus === 'success' && <CheckCircle size={16} />}
+                                            {customApiKeyTestStatus === 'error' && <AlertCircle size={16} />}
+                                            <span>{customApiKeyTestMessage}</span>
+                                        </div>
+                                    )}
+
+                                    <div className="aicore-buttons">
+                                        <button
+                                            className="aicore-test-btn"
+                                            onClick={testCustomApiKey}
+                                            disabled={!customAnthropicApiKey || customApiKeyTestStatus === 'testing'}
+                                        >
+                                            {customApiKeyTestStatus === 'testing' ? 'Testing...' : 'Test API Key'}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* SAP AI Core fields */}
+                            {apiMode === 'sap-ai-core' && (
+                                <div className="api-mode-fields">
+                                    <div className="aicore-form">
+                                        <div className="aicore-field">
+                                            <label>Client ID</label>
+                                            <input
+                                                type="text"
+                                                value={aiCoreCredentials.clientId}
+                                                onChange={(e) => handleAiCoreChange('clientId', e.target.value)}
+                                                placeholder="sb-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx!..."
+                                                className="aicore-input"
+                                            />
+                                        </div>
+
+                                        <div className="aicore-field">
+                                            <label>Client Secret</label>
+                                            <input
+                                                type="password"
+                                                value={aiCoreCredentials.clientSecret}
+                                                onChange={(e) => handleAiCoreChange('clientSecret', e.target.value)}
+                                                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx$..."
+                                                className="aicore-input"
+                                            />
+                                        </div>
+
+                                        <div className="aicore-field">
+                                            <label>Auth URL</label>
+                                            <input
+                                                type="text"
+                                                value={aiCoreCredentials.authUrl}
+                                                onChange={(e) => handleAiCoreChange('authUrl', e.target.value)}
+                                                placeholder="https://xxx.authentication.sap.hana.ondemand.com"
+                                                className="aicore-input"
+                                            />
+                                        </div>
+
+                                        <div className="aicore-field">
+                                            <label>Base URL</label>
+                                            <input
+                                                type="text"
+                                                value={aiCoreCredentials.baseUrl}
+                                                onChange={(e) => handleAiCoreChange('baseUrl', e.target.value)}
+                                                placeholder="https://api.ai.xxx.aws.ml.hana.ondemand.com"
+                                                className="aicore-input"
+                                            />
+                                        </div>
+
+                                        <div className="aicore-row">
+                                            <div className="aicore-field aicore-field-half">
+                                                <label>Resource Group</label>
+                                                <input
+                                                    type="text"
+                                                    value={aiCoreCredentials.resourceGroup}
+                                                    onChange={(e) => handleAiCoreChange('resourceGroup', e.target.value)}
+                                                    placeholder="default"
+                                                    className="aicore-input"
+                                                />
+                                            </div>
+
+                                            <div className="aicore-field aicore-field-half">
+                                                <label>Timeout (ms)</label>
+                                                <input
+                                                    type="number"
+                                                    value={aiCoreCredentials.timeoutMs}
+                                                    onChange={(e) => handleAiCoreChange('timeoutMs', parseInt(e.target.value) || 120000)}
+                                                    placeholder="120000"
+                                                    className="aicore-input"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {aiCoreTestStatus !== 'idle' && (
+                                        <div className={`aicore-test-result ${aiCoreTestStatus}`}>
+                                            {aiCoreTestStatus === 'testing' && <Loader2 size={16} className="spinning" />}
+                                            {aiCoreTestStatus === 'success' && <CheckCircle size={16} />}
+                                            {aiCoreTestStatus === 'error' && <AlertCircle size={16} />}
+                                            <span>{aiCoreTestMessage}</span>
+                                        </div>
+                                    )}
+
+                                    <div className="aicore-buttons" style={{ marginBottom: '8px' }}>
+                                        <button
+                                            className="aicore-clear-btn"
+                                            onClick={clearAiCoreCredentials}
+                                            disabled={!aiCoreCredentials.clientId && !aiCoreCredentials.clientSecret}
+                                        >
+                                            Clear
+                                        </button>
+                                        <button
+                                            className="aicore-test-btn"
+                                            onClick={testAiCoreCredentials}
+                                            disabled={!aiCoreCredentials.clientId || !aiCoreCredentials.clientSecret || aiCoreTestStatus === 'testing'}
+                                        >
+                                            {aiCoreTestStatus === 'testing' ? 'Testing...' : 'Test Connection'}
+                                        </button>
+                                        <button
+                                            className="aicore-save-btn"
+                                            onClick={saveAiCoreCredentials}
+                                            disabled={aiCoreSaved}
+                                        >
+                                            Save Credentials
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="api-mode-actions">
+                                <span className={`api-mode-status ${apiModeSaved ? 'saved' : 'unsaved'}`}>
+                                    {apiModeSaved ? 'Saved' : 'Unsaved changes'}
+                                </span>
+                                <button
+                                    className="aicore-save-btn"
+                                    onClick={saveApiMode}
+                                    disabled={apiModeSaved}
+                                >
+                                    Save Mode
+                                </button>
+                            </div>
+
+                            <p className="api-config-note">
+                                Note: The server must be restarted after changing API mode for the changes to take effect on new tasks.
+                            </p>
                         </div>
                     </CollapsiblePanel>
 
@@ -589,132 +897,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     </div>
                                 </>
                             )}
-                        </div>
-                    </CollapsiblePanel>
-
-                    <CollapsiblePanel
-                        title="SAP AI Core"
-                        icon={<Cloud size={18} />}
-                        isExpanded={expandedPanels.aicore}
-                        onToggle={() => togglePanel('aicore')}
-                    >
-                        <div className="aicore-content">
-                            <p className="aicore-description">
-                                Configure SAP AI Core credentials for the embedded Anthropic proxy.
-                                This enables Claude models through your SAP AI Core deployment.
-                            </p>
-
-                            <div className="aicore-form">
-                                <div className="aicore-field">
-                                    <label>Client ID</label>
-                                    <input
-                                        type="text"
-                                        value={aiCoreCredentials.clientId}
-                                        onChange={(e) => handleAiCoreChange('clientId', e.target.value)}
-                                        placeholder="sb-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx!..."
-                                        className="aicore-input"
-                                    />
-                                </div>
-
-                                <div className="aicore-field">
-                                    <label>Client Secret</label>
-                                    <input
-                                        type="password"
-                                        value={aiCoreCredentials.clientSecret}
-                                        onChange={(e) => handleAiCoreChange('clientSecret', e.target.value)}
-                                        placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx$..."
-                                        className="aicore-input"
-                                    />
-                                </div>
-
-                                <div className="aicore-field">
-                                    <label>Auth URL</label>
-                                    <input
-                                        type="text"
-                                        value={aiCoreCredentials.authUrl}
-                                        onChange={(e) => handleAiCoreChange('authUrl', e.target.value)}
-                                        placeholder="https://xxx.authentication.sap.hana.ondemand.com"
-                                        className="aicore-input"
-                                    />
-                                </div>
-
-                                <div className="aicore-field">
-                                    <label>Base URL</label>
-                                    <input
-                                        type="text"
-                                        value={aiCoreCredentials.baseUrl}
-                                        onChange={(e) => handleAiCoreChange('baseUrl', e.target.value)}
-                                        placeholder="https://api.ai.xxx.aws.ml.hana.ondemand.com"
-                                        className="aicore-input"
-                                    />
-                                </div>
-
-                                <div className="aicore-row">
-                                    <div className="aicore-field aicore-field-half">
-                                        <label>Resource Group</label>
-                                        <input
-                                            type="text"
-                                            value={aiCoreCredentials.resourceGroup}
-                                            onChange={(e) => handleAiCoreChange('resourceGroup', e.target.value)}
-                                            placeholder="default"
-                                            className="aicore-input"
-                                        />
-                                    </div>
-
-                                    <div className="aicore-field aicore-field-half">
-                                        <label>Timeout (ms)</label>
-                                        <input
-                                            type="number"
-                                            value={aiCoreCredentials.timeoutMs}
-                                            onChange={(e) => handleAiCoreChange('timeoutMs', parseInt(e.target.value) || 120000)}
-                                            placeholder="120000"
-                                            className="aicore-input"
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-
-                            {aiCoreTestStatus !== 'idle' && (
-                                <div className={`aicore-test-result ${aiCoreTestStatus}`}>
-                                    {aiCoreTestStatus === 'testing' && <Loader2 size={16} className="spinning" />}
-                                    {aiCoreTestStatus === 'success' && <CheckCircle size={16} />}
-                                    {aiCoreTestStatus === 'error' && <AlertCircle size={16} />}
-                                    <span>{aiCoreTestMessage}</span>
-                                </div>
-                            )}
-
-                            <div className="aicore-actions">
-                                <span className={`aicore-status ${aiCoreSaved ? 'saved' : 'unsaved'}`}>
-                                    {aiCoreSaved ? 'Saved' : 'Unsaved changes'}
-                                </span>
-                                <div className="aicore-buttons">
-                                    <button
-                                        className="aicore-clear-btn"
-                                        onClick={clearAiCoreCredentials}
-                                        disabled={!aiCoreCredentials.clientId && !aiCoreCredentials.clientSecret}
-                                    >
-                                        Clear
-                                    </button>
-                                    <button
-                                        className="aicore-test-btn"
-                                        onClick={testAiCoreCredentials}
-                                        disabled={!aiCoreCredentials.clientId || !aiCoreCredentials.clientSecret || aiCoreTestStatus === 'testing'}
-                                    >
-                                        {aiCoreTestStatus === 'testing' ? 'Testing...' : 'Test Connection'}
-                                    </button>
-                                    <button
-                                        className="aicore-save-btn"
-                                        onClick={saveAiCoreCredentials}
-                                        disabled={aiCoreSaved}
-                                    >
-                                        Save
-                                    </button>
-                                </div>
-                            </div>
-
-                            <p className="aicore-note">
-                                Note: The server must be restarted after changing credentials for the proxy to use them.
-                            </p>
                         </div>
                     </CollapsiblePanel>
 

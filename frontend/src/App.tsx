@@ -6,9 +6,10 @@ import { ProjectPicker } from './components/ProjectPicker';
 import { SettingsMenu } from './components/SettingsMenu';
 import { GlobalVoiceManager } from './components/GlobalVoiceManager';
 import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
+import { SystemStats } from './components/SystemStats';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
@@ -30,11 +31,32 @@ function App() {
         requestArchivedTasks,
         restoreArchivedTask,
         deleteArchivedTask,
+        continueArchivedTask,
         wsRef
     } = useWebSocket();
 
     const { selectedTaskId, tasks, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
+
+    // Count tasks that have running processes (not disconnected or archived)
+    const activeTasks = Array.from(tasks.values()).filter(t =>
+        t.state !== 'disconnected' &&
+        t.state !== 'archived' &&
+        t.state !== 'interrupted'
+    );
+
+    const busyTasks = activeTasks.filter(t => t.state === 'busy');
+    const idleTasks = activeTasks.filter(t => t.state !== 'busy');
+    const busyCount = busyTasks.length;
+    const idleCount = idleTasks.length;
+
+    const taskTooltip = [
+        busyTasks.length > 0 ? '⚡ BUSY TASKS:' : null,
+        ...busyTasks.map(t => `• ${t.prompt || 'No description'}`),
+        (busyTasks.length > 0 && idleTasks.length > 0) ? '' : null,
+        idleTasks.length > 0 ? '💤 IDLE TASKS:' : null,
+        ...idleTasks.map(t => `• ${t.prompt || 'No description'}`)
+    ].filter(item => item !== null).join('\n') || 'No running tasks';
 
     const [sidebarWidth, setSidebarWidth] = useState(() => {
         try {
@@ -129,13 +151,25 @@ function App() {
         // Only update local state - TerminalView will send task:select when it mounts
         useTaskStore.getState().selectTask(taskId);
 
-        // Dispatch scroll-to-bottom event for the task's terminal
-        // Use setTimeout to ensure the terminal has time to mount/update and receive history
+        // Dispatch scroll-to-bottom events with increasing delays to catch both
+        // fast (cached) and slow (network) history loads
+        // The TerminalView also scrolls after receiving task:restore, but these
+        // serve as fallbacks for edge cases
+        const delays = [100, 300, 600];
+        delays.forEach(delay => {
+            setTimeout(() => {
+                window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
+                    detail: { taskId }
+                }));
+            }, delay);
+        });
+
+        // Focus the task input bar after a short delay to allow the component to mount
         setTimeout(() => {
-            window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
+            window.dispatchEvent(new CustomEvent('taskInput:focus', {
                 detail: { taskId }
             }));
-        }, 300);
+        }, 150);
     };
 
     // Count unread messages indicator
@@ -187,6 +221,15 @@ function App() {
                     <h1>Claudia</h1>
                 </div>
                 <div className="header-controls">
+                    {/* Running Process Counter */}
+                    <div className="running-tasks-indicator" title={taskTooltip}>
+                        <Activity size={18} className={busyCount > 0 ? 'active-pulse' : ''} />
+                        <span className="count-busy">{busyCount}</span>
+                        <span className="count-separator">/</span>
+                        <span className="count-idle">{idleCount}</span>
+                    </div>
+
+                    <SystemStats />
                     {supervisorEnabled && (
                         <button
                             className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
@@ -235,6 +278,7 @@ function App() {
                         onRequestArchivedTasks={requestArchivedTasks}
                         onRestoreArchivedTask={restoreArchivedTask}
                         onDeleteArchivedTask={deleteArchivedTask}
+                        onContinueArchivedTask={continueArchivedTask}
                     />
                 </aside>
 

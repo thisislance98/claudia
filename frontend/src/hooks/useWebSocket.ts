@@ -1,20 +1,23 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
-import { WSMessage, Task, Workspace, TaskState, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
+import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl } from '../config/api-config';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
 
-// Poll interval for task status (ms) - fallback for when hooks don't fire
-// Uses faster polling when tasks are busy to quickly detect completion
-const STATUS_POLL_INTERVAL_BUSY = 2000;
-const STATUS_POLL_INTERVAL_IDLE = 5000;
+/** Base delay for reconnection in ms */
+const RECONNECT_BASE_DELAY = 1000;
+/** Maximum reconnection delay in ms */
+const RECONNECT_MAX_DELAY = 30000;
+
+// Note: Polling removed for performance - WebSocket handles all state updates reliably
 
 export function useWebSocket() {
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimeoutRef = useRef<number>();
-    const pollIntervalRef = useRef<number>();
+    /** Track reconnection attempts for exponential backoff */
+    const reconnectAttempts = useRef<number>(0);
 
     const {
         setConnected,
@@ -48,12 +51,21 @@ export function useWebSocket() {
         ws.onopen = () => {
             console.log('[WebSocket] Connected');
             setConnected(true);
+            // Reset reconnection attempts on successful connection
+            reconnectAttempts.current = 0;
         };
 
         ws.onclose = () => {
             console.log('[WebSocket] Disconnected');
             setConnected(false);
-            reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
+            // Exponential backoff: delay = min(base * 2^attempts, max)
+            const delay = Math.min(
+                RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts.current),
+                RECONNECT_MAX_DELAY
+            );
+            console.log(`[WebSocket] Reconnecting in ${delay}ms (attempt ${reconnectAttempts.current + 1})`);
+            reconnectAttempts.current++;
+            reconnectTimeoutRef.current = window.setTimeout(connect, delay);
         };
 
         ws.onerror = (error) => {
@@ -188,6 +200,13 @@ export function useWebSocket() {
                                     detail: { taskId: payload.taskId }
                                 }));
                             }, 100);
+
+                            // Focus the task input bar after a short delay to allow the component to mount
+                            setTimeout(() => {
+                                window.dispatchEvent(new CustomEvent('taskInput:focus', {
+                                    detail: { taskId: payload.taskId }
+                                }));
+                            }, 150);
                         }
                         break;
                     }
@@ -240,6 +259,23 @@ export function useWebSocket() {
                         }
                         break;
                     }
+                    case 'task:archived:continued': {
+                        const payload = message.payload as { task: Task };
+                        console.log('[WebSocket] Archived task continued:', payload.task.id);
+                        removeArchivedTask(payload.task.id);
+                        addTask(payload.task);
+                        selectTask(payload.task.id);
+                        break;
+                    }
+                    case 'error': {
+                        const payload = message.payload as WSErrorPayload;
+                        console.error('[WebSocket] Server error:', payload.message, {
+                            code: payload.code,
+                            originalType: payload.originalType
+                        });
+                        // TODO: Could add a toast notification system here
+                        break;
+                    }
                 }
             } catch (err) {
                 console.error('[WebSocket] Error parsing message:', err);
@@ -258,52 +294,8 @@ export function useWebSocket() {
         }
     }, []);
 
-    // Poll task statuses for more reliable state detection
-    // Backend uses output-based detection (checking for "ctrl+c to interrupt" etc.)
-    // Note: Backend now handles state change events, polling is just a safety net
-    const pollTaskStatuses = useCallback(async () => {
-        const { tasks } = useTaskStore.getState();
-        let hasBusyTasks = false;
-
-        for (const [taskId, task] of tasks) {
-            // Only poll active tasks (not disconnected or exited)
-            if (task.state === 'disconnected' || task.state === 'exited') continue;
-
-            if (task.state === 'busy') {
-                hasBusyTasks = true;
-            }
-
-            try {
-                const response = await fetch(`${API_URL}/api/tasks/${taskId}/status`);
-                if (response.ok) {
-                    const status = await response.json();
-                    // Re-fetch current state to avoid race conditions with WebSocket updates
-                    const currentTask = useTaskStore.getState().tasks.get(taskId);
-                    // Only update if server state differs from CURRENT state (not stale loop state)
-                    if (status.state && currentTask && status.state !== currentTask.state) {
-                        console.log(`[Poll] Task ${taskId} state: ${currentTask.state} -> ${status.state}`);
-                        updateTask({ ...currentTask, state: status.state as TaskState });
-                    }
-                }
-            } catch (err) {
-                // Ignore polling errors
-            }
-        }
-
-        // Adjust polling interval based on whether we have busy tasks
-        // Poll faster when tasks are busy to quickly detect completion
-        const nextInterval = hasBusyTasks ? STATUS_POLL_INTERVAL_BUSY : STATUS_POLL_INTERVAL_IDLE;
-        if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current);
-        }
-        pollIntervalRef.current = window.setInterval(pollTaskStatuses, nextInterval);
-    }, [updateTask]);
-
     useEffect(() => {
         connect();
-
-        // Start polling for task statuses (start with faster interval)
-        pollIntervalRef.current = window.setInterval(pollTaskStatuses, STATUS_POLL_INTERVAL_BUSY);
 
         // Listen for online/offline events
         const handleOnline = () => {
@@ -324,9 +316,6 @@ export function useWebSocket() {
         return () => {
             if (reconnectTimeoutRef.current) {
                 clearTimeout(reconnectTimeoutRef.current);
-            }
-            if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
             }
             window.removeEventListener('online', handleOnline);
             window.removeEventListener('offline', handleOffline);
@@ -423,6 +412,10 @@ export function useWebSocket() {
         sendMessage('task:archived:delete', { taskId });
     }, [sendMessage]);
 
+    const continueArchivedTask = useCallback((taskId: string) => {
+        sendMessage('task:archived:continue', { taskId });
+    }, [sendMessage]);
+
     return {
         createTask,
         selectTaskOnServer,
@@ -445,6 +438,7 @@ export function useWebSocket() {
         requestArchivedTasks,
         restoreArchivedTask,
         deleteArchivedTask,
+        continueArchivedTask,
         wsRef
     };
 }

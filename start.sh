@@ -46,6 +46,12 @@ pkill -f "codeui/backend/test-cli.ts" 2>/dev/null || true
 pkill -f "vite.*codeui" 2>/dev/null || true
 # Kill opencode processes only if they're related to codeui
 pkill -f "codeui.*opencode" 2>/dev/null || true
+# Kill stray Claude Code CLI processes (orphaned zombies)
+echo "Killing zombie Claude processes..."
+pkill -x "claude" 2>/dev/null || true
+pkill -f "claude" 2>/dev/null || true
+# Wait a bit longer for them to die
+sleep 1
 
 # Wait for ports to be freed
 sleep 1
@@ -71,6 +77,9 @@ cd "$(dirname "$0")"
 
 # Export PORT for the backend to use
 export PORT=$BACKEND_PORT
+
+# Increase Node.js memory limit for backend (handles many persisted tasks + archived tasks)
+export NODE_OPTIONS="--max-old-space-size=4096"
 
 # Start backend and frontend
 # Backend: tsx watch auto-reloads on .ts file changes

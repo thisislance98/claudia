@@ -942,3 +942,108 @@
     margin: 12px 0 0 0;
     font-style: italic;
 }
+
+/* API Configuration Panel Styles */
+.api-config-content {
+    padding: 16px 20px;
+}
+
+.api-config-description {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin: 0 0 16px 0;
+    line-height: 1.4;
+}
+
+.api-mode-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.api-mode-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.api-mode-option:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--text-muted);
+}
+
+.api-mode-option.selected {
+    border-color: var(--accent-secondary);
+    background: rgba(139, 92, 246, 0.05);
+}
+
+.api-mode-option input[type="radio"] {
+    margin-top: 3px;
+    accent-color: var(--accent-secondary);
+    cursor: pointer;
+}
+
+.api-mode-content {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+}
+
+.api-mode-title {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.api-mode-description {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+.api-mode-fields {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
+    animation: fadeIn 0.2s ease;
+}
+
+.api-mode-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.api-mode-status {
+    font-size: 0.75rem;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.api-mode-status.saved {
+    color: var(--accent-green);
+    background: rgba(63, 185, 80, 0.1);
+}
+
+.api-mode-status.unsaved {
+    color: var(--accent-yellow);
+    background: rgba(255, 193, 7, 0.1);
+}
+
+.api-config-note {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin: 12px 0 0 0;
+    font-style: italic;
+}

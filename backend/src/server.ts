@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
+import os from 'os';
 import { writeFileSync, existsSync, readFileSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
@@ -11,7 +12,16 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { createAnthropicProxy } from './anthropic-proxy/index.js';
-import { Task, Workspace, WSMessage, WSMessageType, ChatMessage, SuggestedAction, WaitingInputType } from '@claudia/shared';
+import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType } from '@claudia/shared';
+import { validateConfigUpdate, validateWorkspacePath, validateAICoreCredentials } from './validation.js';
+import { createLogger } from './logger.js';
+
+// Note: Route modules available in ./routes/ for reference and future refactoring
+// - config-routes.ts: Config API routes template
+// - task-routes.ts: Task REST API routes template
+// - ws-handlers.ts: WebSocket handlers template
+
+const logger = createLogger('[Server]');
 
 // Valid WebSocket message types for validation
 const VALID_WS_MESSAGE_TYPES = new Set([
@@ -27,6 +37,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:restore',
     'task:archived:list',
     'task:archived:restore',
+    'task:archived:continue',
     'task:archived:delete',
     'workspace:create',
     'workspace:delete',
@@ -53,6 +64,17 @@ function isValidWSMessage(data: unknown): data is WSClientMessage {
     return true;
 }
 
+/**
+ * Send an error response to a WebSocket client
+ */
+function sendWSError(ws: WebSocket, message: string, originalType?: string, code?: string): void {
+    const errorPayload: WSErrorPayload = { message, originalType, code };
+    ws.send(JSON.stringify({
+        type: 'error' as WSMessageType,
+        payload: errorPayload
+    }));
+}
+
 export function createApp(basePath?: string) {
     const app = express();
     const server = createServer(app);
@@ -62,12 +84,34 @@ export function createApp(basePath?: string) {
     app.use(cors());
     app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
 
-    // Mount Anthropic Proxy if SAP AI Core is configured
-    if (process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET) {
-        console.log('[Server] SAP AI Core configured, mounting Anthropic proxy at /');
+    // Initialize configStore first to determine API mode
+    const configStore = new ConfigStore(basePath);
+
+    // Mount Anthropic Proxy based on API mode
+    const apiMode = configStore.getApiMode();
+    const aiCoreCredentials = configStore.getAICoreCredentials();
+
+    // Check for env var override (legacy support)
+    const envConfigured = process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET;
+
+    if (apiMode === 'sap-ai-core' && aiCoreCredentials?.clientId) {
+        // Use credentials from config store
+        console.log('[Server] API mode: sap-ai-core (from config), mounting Anthropic proxy');
         const anthropicProxy = createAnthropicProxy({
-            clientId: process.env.SAP_AICORE_CLIENT_ID,
-            clientSecret: process.env.SAP_AICORE_CLIENT_SECRET,
+            clientId: aiCoreCredentials.clientId,
+            clientSecret: aiCoreCredentials.clientSecret,
+            authUrl: aiCoreCredentials.authUrl,
+            baseUrl: aiCoreCredentials.baseUrl,
+            resourceGroup: aiCoreCredentials.resourceGroup || 'default',
+            requestTimeoutMs: aiCoreCredentials.timeoutMs || 120000
+        });
+        app.use('/', anthropicProxy);
+    } else if (envConfigured) {
+        // Legacy: env vars override for SAP AI Core
+        console.log('[Server] SAP AI Core configured via env vars, mounting Anthropic proxy');
+        const anthropicProxy = createAnthropicProxy({
+            clientId: process.env.SAP_AICORE_CLIENT_ID!,
+            clientSecret: process.env.SAP_AICORE_CLIENT_SECRET!,
             authUrl: process.env.SAP_AICORE_AUTH_URL || '',
             baseUrl: process.env.SAP_AICORE_BASE_URL || '',
             resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
@@ -75,11 +119,10 @@ export function createApp(basePath?: string) {
         });
         app.use('/', anthropicProxy);
     } else {
-        console.log('[Server] SAP AI Core not configured, Anthropic proxy disabled');
+        console.log(`[Server] API mode: ${apiMode}, Anthropic proxy not mounted`);
     }
 
-    // Initialize services
-    const configStore = new ConfigStore(basePath);
+    // Initialize remaining services
     const taskSpawner = new TaskSpawner(undefined, true, configStore);
     const workspaceStore = new WorkspaceStore(basePath);
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
@@ -124,22 +167,32 @@ export function createApp(basePath?: string) {
 
     // On startup, sync rules FROM CLAUDE.md if config.rules is empty
     (async function initRulesFromClaudeMd() {
-        const config = configStore.getConfig();
-        if (!config.rules) {
-            const workspaces = workspaceStore.getWorkspaces();
-            for (const workspace of workspaces) {
-                const rules = await extractRulesFromClaudeMd(workspace.id);
-                if (rules) {
-                    console.log(`[Server] Found existing rules in ${workspace.id}/CLAUDE.md, syncing to config`);
-                    configStore.updateConfig({ rules });
-                    break; // Use rules from first workspace that has them
+        try {
+            const config = configStore.getConfig();
+            if (!config.rules) {
+                const workspaces = workspaceStore.getWorkspaces();
+                for (const workspace of workspaces) {
+                    const rules = await extractRulesFromClaudeMd(workspace.id);
+                    if (rules) {
+                        console.log(`[Server] Found existing rules in ${workspace.id}/CLAUDE.md, syncing to config`);
+                        configStore.updateConfig({ rules });
+                        break; // Use rules from first workspace that has them
+                    }
                 }
             }
+        } catch (error) {
+            logger.error('Failed to initialize rules from CLAUDE.md', { error: error instanceof Error ? error.message : String(error) });
         }
     })();
 
     // Track connected clients
     const clients = new Set<WebSocket>();
+
+    // Batched broadcast state - accumulate state changes and send periodically
+    const BROADCAST_BATCH_INTERVAL_MS = 150; // Batch broadcasts every 150ms
+    let pendingTaskStateChanges: Map<string, Task> = new Map();
+    let pendingTasksUpdated = false;
+    let batchBroadcastTimer: NodeJS.Timeout | null = null;
 
     // Broadcast to all connected clients
     function broadcast(message: WSMessage): void {
@@ -157,19 +210,51 @@ export function createApp(basePath?: string) {
         }
     }
 
+    // Flush batched broadcasts
+    function flushBatchedBroadcasts(): void {
+        // Send individual task state changes (deduplicated - only latest state per task)
+        for (const task of pendingTaskStateChanges.values()) {
+            broadcast({ type: 'task:stateChanged', payload: { task } });
+        }
+        pendingTaskStateChanges.clear();
+
+        // Send tasks:updated only once if flagged
+        if (pendingTasksUpdated) {
+            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+            pendingTasksUpdated = false;
+        }
+
+        batchBroadcastTimer = null;
+    }
+
+    // Schedule a batched broadcast
+    function scheduleBatchedBroadcast(): void {
+        if (!batchBroadcastTimer) {
+            batchBroadcastTimer = setTimeout(flushBatchedBroadcasts, BROADCAST_BATCH_INTERVAL_MS);
+        }
+    }
+
+    // Queue a task state change for batched broadcast
+    function queueTaskStateChange(task: Task): void {
+        pendingTaskStateChanges.set(task.id, task);
+        scheduleBatchedBroadcast();
+    }
+
+    // Queue a tasks:updated broadcast (will be deduplicated)
+    function queueTasksUpdated(): void {
+        pendingTasksUpdated = true;
+        scheduleBatchedBroadcast();
+    }
+
     // Wire up TaskSpawner events
     taskSpawner.on('taskCreated', (task: Task) => {
         broadcast({ type: 'task:created', payload: { task } });
-        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+        queueTasksUpdated(); // Batched
     });
 
     taskSpawner.on('taskStateChanged', (task: Task) => {
         console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
-        broadcast({ type: 'task:stateChanged', payload: { task } });
-        // Note: Removed redundant tasks:updated broadcast here.
-        // When many tasks change state quickly, sending full task lists creates race conditions
-        // where older state can overwrite newer state. The task:stateChanged message already
-        // contains the updated task data which updateTask() handles correctly.
+        queueTaskStateChange(task); // Batched - deduplicates rapid state changes
     });
 
     taskSpawner.on('taskOutput', (taskId: string, data: string) => {
@@ -182,11 +267,11 @@ export function createApp(basePath?: string) {
 
     taskSpawner.on('taskDestroyed', (taskId: string) => {
         broadcast({ type: 'task:destroyed', payload: { taskId } });
-        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+        queueTasksUpdated(); // Batched
     });
 
     taskSpawner.on('tasksUpdated', () => {
-        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+        queueTasksUpdated(); // Batched
     });
 
     taskSpawner.on('taskWaitingInput', (taskId: string, inputType: WaitingInputType, recentOutput: string) => {
@@ -208,7 +293,7 @@ export function createApp(basePath?: string) {
 
     taskSpawner.on('reconnectComplete', (result: { total: number; failed: number; failedIds: string[] }) => {
         console.log(`[Server] Reconnection complete: ${result.total - result.failed}/${result.total} tasks`);
-        // Send updated task list after reconnection
+        // Send updated task list after reconnection (immediate, not batched - important for startup)
         broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
     });
 
@@ -251,19 +336,21 @@ export function createApp(basePath?: string) {
                 try {
                     parsed = JSON.parse(data.toString());
                 } catch {
-                    console.error('[Server] Invalid JSON in WebSocket message');
+                    logger.error('Invalid JSON in WebSocket message');
+                    sendWSError(ws, 'Invalid JSON format', undefined, 'INVALID_JSON');
                     return;
                 }
 
                 if (!isValidWSMessage(parsed)) {
-                    console.error('[Server] Invalid WebSocket message format or unknown type:', parsed);
+                    logger.error('Invalid WebSocket message format or unknown type', { parsed });
+                    sendWSError(ws, 'Invalid message format or unknown type', (parsed as Record<string, unknown>)?.type as string, 'INVALID_MESSAGE');
                     return;
                 }
 
                 const message = parsed;
                 // Only log non-frequent message types to avoid spam
                 if (message.type !== 'task:input' && message.type !== 'task:resize') {
-                    console.log('[Server] Received:', message.type);
+                    logger.info(`Received message`, { type: message.type });
                 }
 
                 const payload = message.payload || {};
@@ -273,10 +360,22 @@ export function createApp(basePath?: string) {
                         // Create a new Claude Code CLI instance
                         const { prompt, workspaceId } = payload as { prompt?: string; workspaceId?: string };
                         if (!prompt || !workspaceId) {
-                            console.error('[Server] task:create requires prompt and workspaceId');
+                            logger.error('task:create requires prompt and workspaceId');
+                            sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
                             return;
                         }
-                        taskSpawner.createTask(prompt, workspaceId);
+                        // Validate workspace path
+                        const workspaceValidation = validateWorkspacePath(workspaceId);
+                        if (!workspaceValidation.valid) {
+                            logger.error('Invalid workspace path', { error: workspaceValidation.error });
+                            sendWSError(ws, workspaceValidation.error || 'Invalid workspace path', message.type, 'INVALID_WORKSPACE');
+                            return;
+                        }
+                        // Pass rules as system prompt if configured
+                        const rules = configStore.getRules();
+                        const systemPrompt = rules?.trim() || undefined;
+                        logger.info(`Creating task with rules`, { hasRules: !!systemPrompt, rulesLength: systemPrompt?.length });
+                        taskSpawner.createTask(prompt, workspaceValidation.data!, systemPrompt);
                         break;
                     }
 
@@ -406,6 +505,26 @@ export function createApp(basePath?: string) {
                         break;
                     }
 
+                    case 'task:archived:continue': {
+                        // Continue an archived task - restores and reconnects it
+                        const { taskId } = payload as { taskId?: string };
+                        if (!taskId) break;
+                        const continuedTask = taskSpawner.continueArchivedTask(taskId);
+                        if (continuedTask) {
+                            ws.send(JSON.stringify({
+                                type: 'task:archived:continued',
+                                payload: { task: continuedTask }
+                            }));
+                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                        } else {
+                            ws.send(JSON.stringify({
+                                type: 'task:archived:continueError',
+                                payload: { taskId, error: 'Task not found in archive' }
+                            }));
+                        }
+                        break;
+                    }
+
                     case 'task:archived:delete': {
                         // Permanently delete an archived task
                         const { taskId } = payload as { taskId?: string };
@@ -507,7 +626,8 @@ export function createApp(basePath?: string) {
                     }
                 }
             } catch (err) {
-                console.error('[Server] Error handling message:', err);
+                logger.error('Error handling message', { error: err instanceof Error ? err.message : String(err) });
+                sendWSError(ws, 'Internal server error processing request', undefined, 'INTERNAL_ERROR');
             }
         });
 
@@ -520,6 +640,55 @@ export function createApp(basePath?: string) {
     // REST API routes
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    // System stats endpoint for CPU and memory monitoring
+    let lastCpuInfo = os.cpus();
+    let lastCpuTime = Date.now();
+
+    app.get('/api/system/stats', (_req, res) => {
+        const currentCpuInfo = os.cpus();
+        const currentTime = Date.now();
+
+        // Calculate CPU usage since last call
+        let totalIdleDiff = 0;
+        let totalTickDiff = 0;
+
+        for (let i = 0; i < currentCpuInfo.length; i++) {
+            const currentCpu = currentCpuInfo[i];
+            const lastCpu = lastCpuInfo[i] || currentCpu;
+
+            const currentTotal = currentCpu.times.user + currentCpu.times.nice +
+                currentCpu.times.sys + currentCpu.times.idle + currentCpu.times.irq;
+            const lastTotal = lastCpu.times.user + lastCpu.times.nice +
+                lastCpu.times.sys + lastCpu.times.idle + lastCpu.times.irq;
+
+            totalIdleDiff += currentCpu.times.idle - lastCpu.times.idle;
+            totalTickDiff += currentTotal - lastTotal;
+        }
+
+        // Update for next call
+        lastCpuInfo = currentCpuInfo;
+        lastCpuTime = currentTime;
+
+        // Calculate CPU percentage
+        const cpuUsage = totalTickDiff > 0
+            ? Math.round(100 - (totalIdleDiff / totalTickDiff * 100))
+            : 0;
+
+        // Get memory info
+        const totalMemory = os.totalmem();
+        const freeMemory = os.freemem();
+        const usedMemory = totalMemory - freeMemory;
+
+        res.json({
+            cpu: Math.max(0, Math.min(100, cpuUsage)),
+            memory: {
+                used: usedMemory,
+                total: totalMemory,
+                percent: Math.round((usedMemory / totalMemory) * 100)
+            }
+        });
     });
 
     app.get('/api/tasks', (_req, res) => {
@@ -612,23 +781,31 @@ export function createApp(basePath?: string) {
 
     app.put('/api/config', (req, res) => {
         try {
-            const updatedConfig = configStore.updateConfig(req.body);
+            // Validate the config update payload
+            const validation = validateConfigUpdate(req.body);
+            if (!validation.valid) {
+                logger.warn('Invalid config update payload', { error: validation.error });
+                return res.status(400).json({ error: validation.error });
+            }
+
+            // Cast is needed because ConfigUpdatePayload has optional fields but AppConfig requires them
+            const updatedConfig = configStore.updateConfig(validation.data! as Parameters<typeof configStore.updateConfig>[0]);
 
             // If rules were updated, sync to all workspace CLAUDE.md files
-            if (req.body.rules !== undefined) {
+            if (validation.data!.rules !== undefined) {
                 const workspaces = workspaceStore.getWorkspaces();
                 for (const workspace of workspaces) {
                     try {
-                        syncRulesToClaudeMd(workspace.id, req.body.rules);
+                        syncRulesToClaudeMd(workspace.id, validation.data!.rules!);
                     } catch (err) {
-                        console.error(`[Server] Failed to sync rules to ${workspace.id}:`, err);
+                        logger.error(`Failed to sync rules to workspace`, { workspaceId: workspace.id, error: err });
                     }
                 }
             }
 
             res.json(updatedConfig);
         } catch (error) {
-            console.error('[Server] Failed to update config:', error);
+            logger.error('Failed to update config', { error });
             res.status(500).json({ error: 'Failed to update config' });
         }
     });
@@ -825,17 +1002,6 @@ export function createApp(basePath?: string) {
         writeFileSync(claudeMdPath, content, 'utf-8');
         console.log(`[Server] Synced rules to ${claudeMdPath}`);
     }
-
-    // Claude Code Stop Hook endpoint - single hook for state transitions
-    // Sets idle or waiting_input based on output parsing
-    app.post('/api/claude-stopped', (req, res) => {
-        const { session_id } = req.body;
-        console.log(`[Server] Claude stop hook received for session: ${session_id}`);
-        if (session_id) {
-            taskSpawner.handleStopHook(session_id);
-        }
-        res.json({ ok: true });
-    });
 
     // Conversation History API
     app.get('/api/tasks/:taskId/conversation', async (req, res) => {

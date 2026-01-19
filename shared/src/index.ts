@@ -3,7 +3,7 @@
 // Export shared configuration  
 export * from './config.js';
 
-export type TaskState = 'idle' | 'busy' | 'waiting_input' | 'exited' | 'disconnected' | 'interrupted' | 'archived';
+export type TaskState = 'idle' | 'busy' | 'starting' | 'waiting_input' | 'exited' | 'disconnected' | 'interrupted' | 'archived';
 
 // Types of input Claude Code might be waiting for
 export type WaitingInputType = 'question' | 'permission' | 'text_input' | 'confirmation';
@@ -73,27 +73,50 @@ export interface TaskSummary {
 
 // WebSocket message types
 export type WSMessageType =
+    // Task lifecycle
     | 'task:created'
     | 'task:stateChanged'
     | 'task:output'
     | 'task:restore'
     | 'task:destroyed'
-    | 'task:archived'
-    | 'task:restored'
     | 'task:waitingInput'
+    | 'task:revertResult'
     | 'tasks:updated'
+    // Archived tasks
+    | 'task:archived'
+    | 'task:archived:list'
+    | 'task:archived:restored'
+    | 'task:archived:restoreError'
+    | 'task:archived:deleted'
+    | 'task:archived:continued'
+    | 'task:archived:continueError'
     | 'archive:updated'
+    // Workspace management
     | 'workspace:created'
     | 'workspace:deleted'
+    | 'workspace:reordered'
+    // Supervisor/Chat
     | 'task:summary'
     | 'supervisor:chat:response'
     | 'supervisor:chat:history'
     | 'supervisor:chat:typing'
+    // Server status
     | 'server:reloading'
     | 'server:reconnecting'
-    | 'init';
+    | 'init'
+    // Error handling
+    | 'error';
 
 export interface WSMessage {
     type: WSMessageType;
     payload: unknown;
+}
+
+/**
+ * Error payload structure for WebSocket error messages
+ */
+export interface WSErrorPayload {
+    message: string;
+    code?: string;
+    originalType?: string;
 }

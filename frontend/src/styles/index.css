@@ -98,6 +98,66 @@ body {
   gap: 12px;
 }
 
+.running-tasks-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  cursor: help;
+}
+
+.running-tasks-indicator:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+
+.running-tasks-indicator svg {
+  color: var(--text-muted);
+}
+
+.running-tasks-indicator svg.active-pulse {
+  color: var(--accent-green);
+  animation: pulse-ring 2s infinite;
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.7;
+  }
+
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(0.95);
+    opacity: 0.7;
+  }
+}
+
+.count-busy {
+  color: var(--accent-green);
+  font-weight: 700;
+}
+
+.count-separator {
+  color: var(--border-color);
+  margin: 0 1px;
+}
+
+.count-idle {
+  color: var(--text-muted);
+}
+
 /* Mode Toggle */
 .mode-toggle {
   display: flex;
@@ -1006,7 +1066,8 @@ body {
   border-radius: 6px;
   padding: 8px 12px;
   margin-bottom: 16px;
-  max-height: calc(1.6em * 3); /* 3 lines based on line-height: 1.6 */
+  max-height: calc(1.6em * 3);
+  /* 3 lines based on line-height: 1.6 */
   overflow-y: auto;
   line-height: 1.6;
   font-size: 0.8125rem;
@@ -1516,6 +1577,7 @@ body {
   border-color: var(--accent-red);
   color: var(--accent-red);
 }
+
 /* Voice Mode Styles */
 
 /* Voice Settings Button */
@@ -1595,15 +1657,19 @@ body {
   from {
     transform: rotate(0deg);
   }
+
   to {
     transform: rotate(360deg);
   }
 }
 
 @keyframes pulse-red {
-  0%, 100% {
+
+  0%,
+  100% {
     box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.7);
   }
+
   50% {
     box-shadow: 0 0 0 8px rgba(248, 81, 73, 0);
   }
@@ -1626,10 +1692,21 @@ body {
 }
 
 @keyframes fadeInOut {
-  0% { opacity: 0; }
-  10% { opacity: 1; }
-  90% { opacity: 1; }
-  100% { opacity: 0; }
+  0% {
+    opacity: 0;
+  }
+
+  10% {
+    opacity: 1;
+  }
+
+  90% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
 }
 
 /* Voice Settings Modal */
@@ -1788,7 +1865,8 @@ body {
   border-top: 1px solid var(--border-color);
 }
 
-.cancel-button, .save-button {
+.cancel-button,
+.save-button {
   padding: 8px 16px;
   border-radius: 6px;
   font-size: 0.9rem;
@@ -1964,6 +2042,7 @@ body {
   from {
     opacity: 0;
   }
+
   to {
     opacity: 1;
   }

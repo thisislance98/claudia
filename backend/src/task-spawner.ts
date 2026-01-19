@@ -3,10 +3,14 @@ import { EventEmitter } from 'events';
 import { Task, TaskState, TaskGitState, WaitingInputType } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import { ConfigStore } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
+import { sanitizePrompt } from './validation.js';
+import { createLogger } from './logger.js';
+
+const logger = createLogger('[TaskSpawner]');
 
 /**
  * Check if Claude Code CLI is installed and available
@@ -42,17 +46,34 @@ interface PersistedTask {
     gitState?: TaskGitState;
     wasInterrupted?: boolean;  // True if task was busy when backend shut down
     systemPrompt?: string;     // Custom system prompt for this task
+    shouldContinue?: boolean;  // True if task should auto-continue on reconnect
+}
+
+// Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
+interface ArchivedTaskMetadata {
+    id: string;
+    prompt: string;
+    workspaceId: string;
+    createdAt: string;
+    lastActivity: string;
+    sessionId: string | null;
+    gitState?: TaskGitState;
+    systemPrompt?: string;
+    // Size of output history in bytes (for display purposes)
+    historySize?: number;
 }
 
 interface TaskPersistence {
     tasks: PersistedTask[];
-    archivedTasks?: PersistedTask[];
+    // Archived tasks now only contain metadata (history stored separately)
+    archivedTasks?: ArchivedTaskMetadata[];
 }
 
 interface InternalTask extends Task {
     process: IPty;
     outputHistory: Buffer[];
     previousHistory?: Buffer; // Historical output from before reconnection (kept separate)
+    lazyHistoryBase64?: string; // Base64-encoded history for lazy loading (memory efficient)
     isActive: boolean;
     initialPromptSent: boolean;
     pendingPrompt: string | null;
@@ -61,6 +82,10 @@ interface InternalTask extends Task {
     gitStateBefore?: Partial<TaskGitState>;
     systemPrompt?: string;
     lastOutputLength: number; // Track output size for state polling
+    hasStartedProcessing: boolean; // True once Claude actually starts processing (output changes after prompt)
+    stateTransitionLock?: boolean; // Prevents concurrent state transitions during polling
+    shouldContinue?: boolean; // True if this is a reconnected task that should auto-continue
+    continuationSent?: boolean; // True if continuation prompt has been sent
 }
 
 /**
@@ -72,25 +97,58 @@ interface InternalTask extends Task {
  * - Output stable → idle OR waiting_input (via output parsing)
  * - Process exit → exited
  */
+/**
+ * TaskSpawner - Manages Claude Code CLI instances
+ *
+ * Responsible for:
+ * - Spawning and managing PTY processes for Claude Code CLI
+ * - Tracking task state through polling-based detection
+ * - Persisting task data across server restarts
+ * - Managing session capture and reconnection
+ *
+ * Events emitted:
+ * - 'taskCreated': When a new task is created
+ * - 'taskStateChanged': When a task's state changes
+ * - 'taskOutput': When a task produces output
+ * - 'taskDestroyed': When a task is destroyed
+ * - 'taskWaitingInput': When a task is waiting for user input
+ * - 'reconnectStart': When auto-reconnection begins
+ * - 'reconnectComplete': When auto-reconnection finishes
+ */
 export class TaskSpawner extends EventEmitter {
     private tasks: Map<string, InternalTask> = new Map();
     private disconnectedTasks: Map<string, PersistedTask> = new Map();
-    private archivedTasks: Map<string, PersistedTask> = new Map();
+    private archivedTasks: Map<string, ArchivedTaskMetadata> = new Map();
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
     private configStore: ConfigStore | null = null;
     private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number }> = new Map();
+    /** Map of task IDs to their session capture interval timers */
+    private sessionCaptureIntervals: Map<string, NodeJS.Timeout> = new Map();
     private autoReconnectPromise: Promise<void> | null = null;
     private isReconnecting: boolean = false;
+    private sessionToTaskId: Map<string, string> = new Map(); // Map session IDs to task IDs
 
     // State polling (replaces hooks and output-based streaming detection)
     private statePollingInterval: NodeJS.Timeout | null = null;
-    private static readonly STATE_POLLING_MS = 3000; // Poll every 3 seconds
+    /** Polling interval in ms - configurable via STATE_POLLING_MS env var */
+    private readonly statePollingMs: number;
 
+    /**
+     * Creates a new TaskSpawner instance
+     * @param persistencePath - Optional path for task persistence file (default: tasks.json in backend dir)
+     * @param autoReconnect - Whether to automatically reconnect disconnected tasks on startup
+     * @param configStore - Optional config store for reading settings
+     */
     constructor(persistencePath?: string, autoReconnect: boolean = true, configStore?: ConfigStore) {
         super();
         this.persistencePath = persistencePath || DEFAULT_PERSISTENCE_PATH;
         this.configStore = configStore || null;
+
+        // Configurable polling interval via environment variable (default: 3000ms)
+        const envPollingMs = parseInt(process.env.STATE_POLLING_MS || '', 10);
+        this.statePollingMs = !isNaN(envPollingMs) && envPollingMs >= 500 ? envPollingMs : 3000;
+
         this.loadPersistedTasks();
 
         // Start state polling
@@ -103,58 +161,113 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
-     * Start polling to check task states every 3 seconds
+     * Get the directory for archived task histories
+     */
+    private getArchivedHistoryDir(): string {
+        return join(dirname(this.persistencePath), 'archived-histories');
+    }
+
+    /**
+     * Get the file path for an archived task's history
+     */
+    private getArchivedHistoryPath(taskId: string): string {
+        return join(this.getArchivedHistoryDir(), `${taskId}.txt`);
+    }
+
+    /**
+     * Start polling to check task states at the configured interval
      */
     private startStatePolling(): void {
         if (this.statePollingInterval) return;
 
         this.statePollingInterval = setInterval(() => {
             this.checkTaskStates();
-        }, TaskSpawner.STATE_POLLING_MS);
+        }, this.statePollingMs);
 
-        console.log(`[TaskSpawner] State polling started (every ${TaskSpawner.STATE_POLLING_MS}ms)`);
+        logger.info(`State polling started`, { intervalMs: this.statePollingMs });
     }
 
     /**
-     * Check all tasks for state changes based on output changes
+     * Check all tasks for state changes based on output changes.
+     * Uses a per-task lock to prevent race conditions from concurrent state transitions.
      */
     private checkTaskStates(): void {
         for (const task of this.tasks.values()) {
             if (task.state === 'exited') continue;
+
+            // Skip if this task is already being transitioned (prevents race conditions)
+            if (task.stateTransitionLock) {
+                continue;
+            }
 
             const currentLength = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
             const outputChanged = currentLength !== task.lastOutputLength;
             task.lastOutputLength = currentLength;
 
             if (outputChanged) {
-                // Output is changing → busy
-                if (task.state !== 'busy') {
-                    console.log(`[TaskSpawner] Polling: task ${task.id} → busy (output changed)`);
-                    task.state = 'busy';
-                    task.waitingInputType = undefined;
-                    this.emit('taskStateChanged', this.toPublicTask(task));
+                // Output is changing → busy (or starting → busy if task actually started)
+                if (task.state === 'starting') {
+                    // Task is starting and we got output - check if it's real processing or just TUI setup
+                    if (task.hasStartedProcessing) {
+                        this.transitionTaskState(task, 'busy', undefined, 'polling: starting with output');
+                    }
+                    // If not hasStartedProcessing, leave in 'starting' state - it's just TUI setup
+                } else if (task.state !== 'busy') {
+                    this.transitionTaskState(task, 'busy', undefined, 'polling: output changed');
                 }
             } else {
-                // Output stable → check if idle or waiting_input
+                // Output stable → check if idle or waiting_input (but only for tasks that have started)
                 if (task.state === 'busy') {
                     const recentOutput = this.getRecentOutput(task, 2048);
                     const inputType = this.detectWaitingForInput(recentOutput);
 
                     if (inputType) {
-                        console.log(`[TaskSpawner] Polling: task ${task.id} → waiting_input (${inputType})`);
-                        task.state = 'waiting_input';
-                        task.waitingInputType = inputType;
-                        this.emit('taskStateChanged', this.toPublicTask(task));
+                        this.transitionTaskState(task, 'waiting_input', inputType, `polling: detected ${inputType}`);
                         this.emit('taskWaitingInput', task.id, inputType, recentOutput);
                     } else {
-                        console.log(`[TaskSpawner] Polling: task ${task.id} → idle`);
-                        task.state = 'idle';
-                        task.waitingInputType = undefined;
+                        this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
                         this.captureGitStateAfterTask(task.id);
-                        this.emit('taskStateChanged', this.toPublicTask(task));
                     }
                 }
+                // Don't transition 'starting' → 'idle' - leave it in starting until Enter is accepted
             }
+        }
+    }
+
+    /**
+     * Safely transition a task's state with locking to prevent race conditions.
+     * @param task - The task to transition
+     * @param newState - The new state
+     * @param waitingInputType - Optional waiting input type (only for 'waiting_input' state)
+     * @param reason - Reason for the transition (for logging)
+     */
+    private transitionTaskState(
+        task: InternalTask,
+        newState: TaskState,
+        waitingInputType: WaitingInputType | undefined,
+        reason: string
+    ): void {
+        // Acquire lock
+        if (task.stateTransitionLock) {
+            logger.warn('Skipping state transition - lock held', { taskId: task.id, newState, reason });
+            return;
+        }
+        task.stateTransitionLock = true;
+
+        try {
+            const oldState = task.state;
+            if (oldState === newState && task.waitingInputType === waitingInputType) {
+                // No actual change, skip
+                return;
+            }
+
+            console.log(`[TaskSpawner] Polling: task ${task.id} → ${newState} (${reason})`);
+            task.state = newState;
+            task.waitingInputType = waitingInputType;
+            this.emit('taskStateChanged', this.toPublicTask(task));
+        } finally {
+            // Release lock
+            task.stateTransitionLock = false;
         }
     }
 
@@ -182,19 +295,32 @@ export class TaskSpawner extends EventEmitter {
             return;
         }
 
+        // Only auto-reconnect tasks that were interrupted (busy) or have shouldContinue set
+        // Other tasks will stay disconnected and reconnect on-demand when selected
+        const tasksToReconnect = disconnectedIds.filter(id => {
+            const task = this.disconnectedTasks.get(id);
+            return task && (task.wasInterrupted || task.shouldContinue);
+        });
+
+        if (tasksToReconnect.length === 0) {
+            console.log(`[TaskSpawner] No interrupted tasks to auto-reconnect. ${disconnectedIds.length} tasks matching lazy load criteria.`);
+            this.autoReconnectPromise = null;
+            return;
+        }
+
         this.isReconnecting = true;
-        this.emit('reconnectStart', disconnectedIds.length);
-        console.log(`[TaskSpawner] Auto-reconnecting ${disconnectedIds.length} disconnected tasks...`);
+        this.emit('reconnectStart', tasksToReconnect.length);
+        console.log(`[TaskSpawner] Auto-reconnecting ${tasksToReconnect.length} interrupted tasks (of ${disconnectedIds.length} total)...`);
 
         const MAX_RETRIES = 2;
         const failedTasks: string[] = [];
 
-        for (let i = 0; i < disconnectedIds.length; i++) {
-            const taskId = disconnectedIds[i];
+        for (let i = 0; i < tasksToReconnect.length; i++) {
+            const taskId = tasksToReconnect[i];
             const persisted = this.disconnectedTasks.get(taskId);
             if (!persisted) continue;
 
-            console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${disconnectedIds.length}: ${taskId}`);
+            console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${tasksToReconnect.length}: ${taskId}`);
 
             let success = false;
             for (let attempt = 1; attempt <= MAX_RETRIES && !success; attempt++) {
@@ -246,18 +372,56 @@ export class TaskSpawner extends EventEmitter {
         try {
             if (existsSync(this.persistencePath)) {
                 const data = readFileSync(this.persistencePath, 'utf-8');
-                const persistence: TaskPersistence = JSON.parse(data);
+                // Use 'any' for raw persistence to handle migration from old format
+                const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[] };
                 console.log(`[TaskSpawner] Loading ${persistence.tasks.length} persisted tasks`);
 
                 for (const persisted of persistence.tasks) {
                     this.disconnectedTasks.set(persisted.id, persisted);
                 }
 
-                // Load archived tasks
+                // Load archived tasks - migrate old format if needed
                 if (persistence.archivedTasks) {
-                    console.log(`[TaskSpawner] Loading ${persistence.archivedTasks.length} archived tasks`);
+                    console.log(`[TaskSpawner] Loading ${persistence.archivedTasks.length} archived tasks (metadata only)`);
+                    let migratedCount = 0;
+                    const historyDir = this.getArchivedHistoryDir();
+
                     for (const archived of persistence.archivedTasks) {
-                        this.archivedTasks.set(archived.id, archived);
+                        // Migration: if archived task has embedded outputHistory, save to disk
+                        if (archived.outputHistory && typeof archived.outputHistory === 'string') {
+                            // Save history to disk
+                            if (!existsSync(historyDir)) {
+                                mkdirSync(historyDir, { recursive: true });
+                            }
+                            try {
+                                writeFileSync(this.getArchivedHistoryPath(archived.id), archived.outputHistory);
+                                migratedCount++;
+                            } catch (e) {
+                                console.error(`[TaskSpawner] Failed to migrate history for ${archived.id}:`, e);
+                            }
+                        }
+
+                        // Store only metadata (no outputHistory in memory)
+                        const metadata: ArchivedTaskMetadata = {
+                            id: archived.id,
+                            prompt: archived.prompt,
+                            workspaceId: archived.workspaceId,
+                            createdAt: archived.createdAt,
+                            lastActivity: archived.lastActivity,
+                            sessionId: archived.sessionId,
+                            gitState: archived.gitState,
+                            systemPrompt: archived.systemPrompt,
+                            historySize: archived.outputHistory
+                                ? Math.floor(archived.outputHistory.length * 0.75)
+                                : archived.historySize || 0,
+                        };
+                        this.archivedTasks.set(archived.id, metadata);
+                    }
+
+                    if (migratedCount > 0) {
+                        console.log(`[TaskSpawner] Migrated ${migratedCount} archived tasks to lazy loading format`);
+                        // Save immediately to persist the migration (removes outputHistory from JSON)
+                        this.saveTasks();
                     }
                 }
             }
@@ -278,17 +442,38 @@ export class TaskSpawner extends EventEmitter {
             const tasksToSave: PersistedTask[] = [];
 
             for (const task of this.tasks.values()) {
-                // Combine previous history + current output for persistence
-                const buffers: Buffer[] = [];
-                if (task.previousHistory) {
-                    buffers.push(task.previousHistory);
+                let historyBase64: string;
+
+                // If history was never decoded (lazy loading), try to preserve it without decoding
+                if (task.lazyHistoryBase64 && !task.previousHistory) {
+                    // Check if current output is minimal (just the resume message)
+                    const currentOutputSize = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
+
+                    if (currentOutputSize < 1024) {
+                        // Minimal new output - just use the original lazy history as-is
+                        // The small amount of new output will be regenerated on next restart anyway
+                        historyBase64 = task.lazyHistoryBase64;
+                    } else {
+                        // Significant new output - need to combine (this is rare)
+                        const currentOutput = Buffer.concat(task.outputHistory);
+                        const lazyHistory = Buffer.from(task.lazyHistoryBase64, 'base64');
+                        historyBase64 = Buffer.concat([lazyHistory, currentOutput]).toString('base64');
+                    }
+                } else {
+                    // Combine previous history + current output for persistence
+                    const buffers: Buffer[] = [];
+                    if (task.previousHistory) {
+                        buffers.push(task.previousHistory);
+                    }
+                    buffers.push(...task.outputHistory);
+                    const historyBuffer = Buffer.concat(buffers);
+                    historyBase64 = historyBuffer.toString('base64');
                 }
-                buffers.push(...task.outputHistory);
-                const historyBuffer = Buffer.concat(buffers);
-                const historyBase64 = historyBuffer.toString('base64');
 
                 // Track if task was busy when being saved (will be interrupted)
-                const wasInterrupted = task.state === 'busy';
+                const wasInterrupted = task.state === 'busy' || task.state === 'starting';
+                // Tasks that were busy should auto-continue on restart
+                const shouldContinue = wasInterrupted && task.sessionId != null;
 
                 tasksToSave.push({
                     id: task.id,
@@ -300,6 +485,7 @@ export class TaskSpawner extends EventEmitter {
                     sessionId: task.sessionId,
                     outputHistory: historyBase64,
                     wasInterrupted,
+                    shouldContinue,
                     systemPrompt: task.systemPrompt,
                 });
             }
@@ -308,8 +494,8 @@ export class TaskSpawner extends EventEmitter {
                 tasksToSave.push(task);
             }
 
-            // Convert archived tasks Map to array for persistence
-            const archivedTasksToSave: PersistedTask[] = Array.from(this.archivedTasks.values());
+            // Archived tasks metadata (history is stored separately in files)
+            const archivedTasksToSave: ArchivedTaskMetadata[] = Array.from(this.archivedTasks.values());
 
             const persistence: TaskPersistence = {
                 tasks: tasksToSave,
@@ -321,7 +507,7 @@ export class TaskSpawner extends EventEmitter {
             }
 
             writeFileSync(this.persistencePath, JSON.stringify(persistence, null, 2));
-            console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived`);
+            console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived (metadata only)`);
         } catch (error) {
             console.error('[TaskSpawner] Failed to save tasks:', error);
         }
@@ -349,7 +535,16 @@ export class TaskSpawner extends EventEmitter {
         return join(homeDir, '.claude', 'projects', folderName);
     }
 
+    /**
+     * Starts monitoring for session file creation
+     * Watches the Claude projects directory for new .jsonl files
+     * @param taskId - The task ID to capture session for
+     * @param workspaceId - The workspace path
+     */
     private startSessionCapture(taskId: string, workspaceId: string): void {
+        // Clear any existing capture for this task to prevent race conditions
+        this.clearSessionCapture(taskId);
+
         const claudeDir = this.getClaudeProjectsDir(workspaceId);
 
         let existingFiles = new Set<string>();
@@ -379,14 +574,13 @@ export class TaskSpawner extends EventEmitter {
                         const task = this.tasks.get(taskId);
 
                         if (task && !task.sessionId) {
-                            console.log(`[TaskSpawner] Captured sessionId ${sessionId} for task ${taskId}`);
+                            logger.info(`Captured session for task`, { taskId, sessionId });
                             task.sessionId = sessionId;
                             this.sessionToTaskId.set(sessionId, taskId);
                             this.scheduleSave();
                         }
 
-                        clearInterval(checkInterval);
-                        this.pendingSessionCapture.delete(taskId);
+                        this.clearSessionCapture(taskId);
                         return;
                     }
                 }
@@ -395,14 +589,29 @@ export class TaskSpawner extends EventEmitter {
 
                 const pending = this.pendingSessionCapture.get(taskId);
                 if (pending && Date.now() - pending.startTime > 30000) {
-                    console.log(`[TaskSpawner] Session capture timeout for task ${taskId}`);
-                    clearInterval(checkInterval);
-                    this.pendingSessionCapture.delete(taskId);
+                    logger.warn(`Session capture timeout`, { taskId });
+                    this.clearSessionCapture(taskId);
                 }
             } catch (_e) {
-                // Ignore errors
+                // Ignore errors during session capture
             }
         }, 500);
+
+        // Store the interval so we can clear it later
+        this.sessionCaptureIntervals.set(taskId, checkInterval);
+    }
+
+    /**
+     * Clears any pending session capture for a task
+     * @param taskId - The task ID to clear capture for
+     */
+    private clearSessionCapture(taskId: string): void {
+        const interval = this.sessionCaptureIntervals.get(taskId);
+        if (interval) {
+            clearInterval(interval);
+            this.sessionCaptureIntervals.delete(taskId);
+        }
+        this.pendingSessionCapture.delete(taskId);
     }
 
     private stripAnsi(str: string): string {
@@ -421,6 +630,38 @@ export class TaskSpawner extends EventEmitter {
         return str.includes('Try "') ||
             str.includes('? for shortcuts') ||
             (str.includes('───') && str.includes('❯'));
+    }
+
+    /**
+     * Get environment variables for spawning Claude tasks based on API mode
+     * - default: Use Claude's default settings from ~/.claude.json
+     * - custom-anthropic: Use custom API key with Anthropic's API directly
+     * - sap-ai-core: Use the embedded proxy that routes through SAP AI Core
+     */
+    private getTaskEnvironment(): { [key: string]: string } {
+        const taskEnv = { ...process.env } as { [key: string]: string };
+
+        if (!this.configStore) return taskEnv;
+
+        const apiMode = this.configStore.getApiMode();
+        console.log(`[TaskSpawner] API mode: ${apiMode}`);
+
+        if (apiMode === 'custom-anthropic') {
+            const apiKey = this.configStore.getCustomAnthropicApiKey();
+            if (apiKey) {
+                taskEnv['ANTHROPIC_API_KEY'] = apiKey;
+                console.log(`[TaskSpawner] Using custom Anthropic API key`);
+            }
+        } else if (apiMode === 'sap-ai-core') {
+            // Point to the embedded proxy server
+            // The proxy is mounted at the backend's root, so we use the backend URL
+            const backendPort = process.env.PORT || '3001';
+            taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}`;
+            console.log(`[TaskSpawner] Using SAP AI Core proxy at localhost:${backendPort}`);
+        }
+        // 'default' mode: don't set any env vars, let Claude Code use its own settings
+
+        return taskEnv;
     }
 
     /**
@@ -554,20 +795,23 @@ export class TaskSpawner extends EventEmitter {
         return task.state;
     }
 
-    private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 3): void {
+    private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
         console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
 
-        // For short prompts, type character by character for a nice effect
-        // For longer prompts (>50 chars), paste directly to avoid slow typing
-        if (prompt.length <= 50) {
+        // For small messages (≤200 chars), type character by character
+        // This gives the TUI time to process and makes Enter more reliable
+        // For longer prompts, paste directly to avoid excessive delay
+        if (prompt.length <= 200) {
             let charIndex = 0;
+            const charDelay = prompt.length <= 20 ? 10 : 5; // Slower for very short messages
             const writeNextChar = () => {
                 if (charIndex < prompt.length) {
                     task.process.write(prompt[charIndex]);
                     charIndex++;
-                    setTimeout(writeNextChar, 5);
+                    setTimeout(writeNextChar, charDelay);
                 } else {
-                    setTimeout(() => this.sendEnterWithRetry(task, maxRetries), 600);
+                    // Give TUI time to settle before Enter
+                    setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), 500);
                 }
             };
             writeNextChar();
@@ -575,37 +819,107 @@ export class TaskSpawner extends EventEmitter {
             // Paste the entire prompt at once, then use retry mechanism to ensure Enter is accepted
             task.process.write(prompt);
             task.promptSubmitAttempts = 0;
-            // Small delay to let the prompt be written, then send Enter with retries
-            setTimeout(() => this.sendEnterWithRetry(task, maxRetries), 300);
+            // Give more time for longer prompts to be written before sending Enter
+            const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 1000);
+            console.log(`[TaskSpawner] Waiting ${delayMs}ms before sending Enter for prompt of ${prompt.length} chars`);
+            setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), delayMs);
         }
     }
 
-    private sendEnterWithRetry(task: InternalTask, retriesLeft: number): void {
+    /**
+     * Check if recent output indicates Claude has started processing
+     * Look for spinner characters, "Thinking", "Working", etc.
+     */
+    private hasProcessingIndicators(task: InternalTask): boolean {
+        const recentOutput = this.getRecentOutput(task, 1024);
+        // Look for Claude processing indicators
+        const processingPatterns = [
+            /Thinking/i,
+            /Working/i,
+            /Concocting/i,
+            /Analyzing/i,
+            /Reading/i,
+            /Writing/i,
+            /⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/,  // Spinner characters
+            /✶|✳|✢|·|✻|✽|✺/,  // Claude spinner chars
+            /───.*Claude/,  // Header lines
+        ];
+        return processingPatterns.some(pattern => pattern.test(recentOutput));
+    }
+
+    /**
+     * Send Enter key with retry logic to ensure Claude accepts the input.
+     * Consolidates logic for both initial prompt submission and follow-up input.
+     * @param task - The task to send Enter to
+     * @param retriesLeft - Number of retries remaining
+     * @param options - Options for retry behavior
+     */
+    private sendEnterWithRetry(
+        task: InternalTask,
+        retriesLeft: number,
+        options: { isInitialPrompt?: boolean; enterKey?: string } = {}
+    ): void {
+        const { isInitialPrompt = false, enterKey = '\r' } = options;
+        const context = isInitialPrompt ? 'initial prompt' : 'input';
+
         if (retriesLeft <= 0) {
-            console.log(`[TaskSpawner] Max retries reached for task ${task.id}`);
+            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, sending burst of Enter keys`);
+            // Final attempt - send multiple Enters in quick succession
+            task.process.write(enterKey);
+            setTimeout(() => task.process.write(enterKey), 100);
+            setTimeout(() => task.process.write(enterKey), 250);
             return;
         }
 
         task.promptSubmitAttempts = (task.promptSubmitAttempts || 0) + 1;
-        console.log(`[TaskSpawner] Sending Enter (attempt ${task.promptSubmitAttempts}) to task ${task.id}`);
-        task.process.write('\r');
+        console.log(`[TaskSpawner] Sending Enter for ${context} (attempt ${task.promptSubmitAttempts}) to task ${task.id}`);
+
+        // For follow-up input, transition to busy state before sending Enter
+        if (!isInitialPrompt && (task.state === 'idle' || task.state === 'waiting_input')) {
+            task.state = 'busy';
+            task.waitingInputType = undefined;
+            this.emit('taskStateChanged', this.toPublicTask(task));
+        }
+
+        // Send Enter
+        task.process.write(enterKey);
 
         setTimeout(() => {
-            if (task.state === 'busy') {
-                console.log(`[TaskSpawner] Prompt accepted, Claude is busy`);
-            } else {
-                console.log(`[TaskSpawner] Claude still idle, retrying Enter`);
-                setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1), 500);
+            // Check if Claude started processing (not just any output change)
+            if (this.hasProcessingIndicators(task)) {
+                console.log(`[TaskSpawner] Claude processing detected for ${context} after attempt ${task.promptSubmitAttempts}`);
+                if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
+                    task.hasStartedProcessing = true;
+                    task.state = 'busy';
+                    console.log(`[TaskSpawner] Task ${task.id} transitioned: starting → busy`);
+                    this.emit('taskStateChanged', this.toPublicTask(task));
+                }
+                return;
             }
+
+            // Not started yet - schedule retry with longer delay
+            console.log(`[TaskSpawner] No processing indicators found for ${context}, will retry Enter in 500ms`);
+            setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, options), 500);
         }, 800);
     }
 
+    /**
+     * Creates a new Claude Code task
+     * @param prompt - The user's prompt for the task
+     * @param workspaceId - The workspace directory path
+     * @param systemPrompt - Optional system prompt override
+     * @returns The created task object
+     */
     async createTask(prompt: string, workspaceId: string, systemPrompt?: string): Promise<Task> {
         const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
+        // Sanitize prompt to prevent command injection and other issues
+        const sanitizedPrompt = sanitizePrompt(prompt);
+        const sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
+
         const gitStateBefore = await captureGitStateBefore(workspaceId);
         if (gitStateBefore) {
-            console.log(`[TaskSpawner] Captured git state: commit=${gitStateBefore.commitBefore?.substring(0, 7)}`);
+            logger.info(`Captured git state before task`, { taskId: id, commit: gitStateBefore.commitBefore?.substring(0, 7) });
         }
 
         const customArgs = process.env['CC_CLAUDE_ARGS']
@@ -616,43 +930,47 @@ export class TaskSpawner extends EventEmitter {
 
         if (this.configStore?.getSkipPermissions()) {
             claudeArgs.push('--dangerously-skip-permissions');
-            console.log(`[TaskSpawner] Skip permissions enabled`);
+            logger.info(`Skip permissions enabled`);
         }
 
         // Add custom system prompt if provided
-        if (systemPrompt && systemPrompt.trim()) {
-            claudeArgs.push('--system-prompt', systemPrompt.trim());
-            console.log(`[TaskSpawner] Using custom system prompt`);
+        if (sanitizedSystemPrompt && sanitizedSystemPrompt.trim()) {
+            claudeArgs.push('--system-prompt', sanitizedSystemPrompt.trim());
+            logger.info(`Using custom system prompt`);
         }
 
-        console.log(`[TaskSpawner] Creating task ${id} in ${workspaceId}`);
-        console.log(`[TaskSpawner] Command: claude ${claudeArgs.join(' ')}`);
+        logger.info(`Creating task`, { taskId: id, workspaceId });
+        logger.debug(`Command args`, { args: claudeArgs });
+
+        // Get environment with API mode settings
+        const taskEnv = this.getTaskEnvironment();
 
         const ptyProcess = spawn('claude', claudeArgs, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,
             cwd: workspaceId,
-            env: process.env as { [key: string]: string },
+            env: taskEnv,
         });
 
         const now = new Date();
         const task: InternalTask = {
             id,
-            prompt,
+            prompt: sanitizedPrompt,
             workspaceId,
             process: ptyProcess,
-            state: 'busy',  // Start as busy
+            state: 'starting',  // Start in 'starting' state until Claude actually begins processing
             outputHistory: [],
             lastActivity: now,
             createdAt: now,
             isActive: false,
             initialPromptSent: false,
-            pendingPrompt: prompt,
+            pendingPrompt: sanitizedPrompt,
             sessionId: null,
             gitStateBefore: gitStateBefore || undefined,
-            systemPrompt: systemPrompt?.trim() || undefined,
+            systemPrompt: sanitizedSystemPrompt?.trim() || undefined,
             lastOutputLength: 0,  // Initialize for state polling
+            hasStartedProcessing: false,  // Will be true once output changes after prompt sent
         };
 
         this.setupProcessHandlers(task);
@@ -669,8 +987,8 @@ export class TaskSpawner extends EventEmitter {
             const buffer = Buffer.from(data, 'utf8');
             task.outputHistory.push(buffer);
 
-            // Limit history to 10MB
-            const MAX_HISTORY_SIZE = 10 * 1024 * 1024;
+            // Limit history to 2MB per task (reduced from 10MB for better memory usage with many tasks)
+            const MAX_HISTORY_SIZE = 2 * 1024 * 1024;
             let totalSize = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
             while (totalSize > MAX_HISTORY_SIZE && task.outputHistory.length > 0) {
                 const removed = task.outputHistory.shift();
@@ -710,6 +1028,10 @@ export class TaskSpawner extends EventEmitter {
 
         task.process.onExit(({ exitCode }) => {
             console.log(`[TaskSpawner] Task ${task.id} exited with code ${exitCode}`);
+
+            // Clean up session capture interval to prevent memory leak
+            this.clearSessionCapture(task.id);
+
             // Only emit events if task still exists in map (not being destroyed)
             if (!this.tasks.has(task.id)) {
                 console.log(`[TaskSpawner] Task ${task.id} already removed, skipping state change`);
@@ -803,8 +1125,17 @@ export class TaskSpawner extends EventEmitter {
 
     setTaskActive(taskId: string, active: boolean): void {
         if (active) {
+            // Clear decoded history from all other tasks to free memory
+            // This prevents memory buildup when rapidly switching between tasks
             for (const task of this.tasks.values()) {
                 task.isActive = false;
+                // If this task has decoded history but isn't the one being activated,
+                // re-encode it back to base64 to free the buffer memory
+                if (task.id !== taskId && task.previousHistory && !task.lazyHistoryBase64) {
+                    task.lazyHistoryBase64 = task.previousHistory.toString('base64');
+                    task.previousHistory = undefined;
+                    console.log(`[TaskSpawner] Freed memory for inactive task ${task.id}`);
+                }
             }
         }
 
@@ -844,21 +1175,67 @@ export class TaskSpawner extends EventEmitter {
     /**
      * Get combined history: previous session output + current session output
      * This ensures historical terminal output is shown before live output
+     * 
+     * NOTE: We limit the history sent to prevent memory exhaustion on tasks
+     * with very large histories (some can be 10+ MB).
+     * 
+     * This also handles lazy loading - history may be stored as base64 and
+     * decoded only when the task is actually selected.
      */
     private getCombinedHistory(task: InternalTask): string | null {
-        const parts: string[] = [];
+        // Limit history sent to frontend to prevent memory exhaustion
+        const MAX_HISTORY_TO_SEND = 2 * 1024 * 1024; // 2MB max
 
-        // Add previous history first (from before reconnection)
-        if (task.previousHistory) {
-            parts.push(task.previousHistory.toString('utf8'));
+        // Handle lazy loading: decode base64 history on first access
+        if (task.lazyHistoryBase64 && !task.previousHistory) {
+            try {
+                const fullHistory = Buffer.from(task.lazyHistoryBase64, 'base64');
+                if (fullHistory.length > MAX_HISTORY_TO_SEND) {
+                    // Only keep the last 2MB
+                    const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
+                    task.previousHistory = Buffer.concat([
+                        truncationMessage,
+                        fullHistory.slice(fullHistory.length - MAX_HISTORY_TO_SEND)
+                    ]);
+                    console.log(`[TaskSpawner] Lazy loaded and truncated history from ${fullHistory.length} to ${task.previousHistory.length} bytes`);
+                } else {
+                    task.previousHistory = fullHistory;
+                    console.log(`[TaskSpawner] Lazy loaded ${task.previousHistory.length} bytes of history`);
+                }
+                // Clear the base64 string to free memory
+                task.lazyHistoryBase64 = undefined;
+            } catch (e) {
+                console.error(`[TaskSpawner] Failed to lazy load history:`, e);
+                task.lazyHistoryBase64 = undefined;
+            }
         }
 
-        // Then add current session output
-        if (task.outputHistory.length > 0) {
-            parts.push(task.outputHistory.map(buf => buf.toString('utf8')).join(''));
+        const parts: Buffer[] = [];
+        let totalSize = 0;
+
+        // Add current session output first (we want to keep recent output)
+        for (let i = task.outputHistory.length - 1; i >= 0 && totalSize < MAX_HISTORY_TO_SEND; i--) {
+            parts.unshift(task.outputHistory[i]);
+            totalSize += task.outputHistory[i].length;
         }
 
-        return parts.length > 0 ? parts.join('') : null;
+        // Then add previous history if we still have room
+        if (task.previousHistory && totalSize < MAX_HISTORY_TO_SEND) {
+            const remainingSpace = MAX_HISTORY_TO_SEND - totalSize;
+            if (task.previousHistory.length <= remainingSpace) {
+                parts.unshift(task.previousHistory);
+            } else {
+                // Only include the tail of previous history
+                const tailStart = task.previousHistory.length - remainingSpace;
+                const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
+                parts.unshift(task.previousHistory.slice(tailStart));
+                parts.unshift(truncationMessage);
+            }
+        }
+
+        if (parts.length === 0) return null;
+
+        return Buffer.concat(parts).toString('utf8');
     }
 
     writeToTask(taskId: string, data: string): void {
@@ -877,43 +1254,13 @@ export class TaskSpawner extends EventEmitter {
                 task.process.write(messageContent);
                 task.promptSubmitAttempts = 0;
 
-                // Use same retry mechanism as initial prompt
-                setTimeout(() => this.sendEnterWithRetryForInput(task, enterKey, 3), 200);
+                // Use consolidated retry mechanism with follow-up input options
+                setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }), 200);
             } else {
                 // Single keypress or task is busy - write directly
                 task.process.write(data);
             }
         }
-    }
-
-    private sendEnterWithRetryForInput(task: InternalTask, enterKey: string, retriesLeft: number): void {
-        if (retriesLeft <= 0) {
-            console.log(`[TaskSpawner] Max input retries reached for task ${task.id}`);
-            return;
-        }
-
-        task.promptSubmitAttempts = (task.promptSubmitAttempts || 0) + 1;
-        console.log(`[TaskSpawner] Sending Enter for input (attempt ${task.promptSubmitAttempts}) to task ${task.id}`);
-
-        // Mark as busy before sending Enter
-        if (task.state === 'idle' || task.state === 'waiting_input') {
-            task.state = 'busy';
-            task.waitingInputType = undefined;
-            this.emit('taskStateChanged', this.toPublicTask(task));
-        }
-
-        task.process.write(enterKey);
-
-        // Check if Claude started processing
-        setTimeout(() => {
-            // If task went back to idle/waiting, the input wasn't processed - retry
-            if (task.state === 'idle' || task.state === 'waiting_input') {
-                console.log(`[TaskSpawner] Claude still idle, retrying Enter for input`);
-                setTimeout(() => this.sendEnterWithRetryForInput(task, enterKey, retriesLeft - 1), 400);
-            } else if (task.state === 'busy') {
-                console.log(`[TaskSpawner] Input accepted, Claude is processing`);
-            }
-        }, 600);
     }
 
     resizeTask(taskId: string, cols: number, rows: number): void {
@@ -933,14 +1280,58 @@ export class TaskSpawner extends EventEmitter {
         return false;
     }
 
+    /**
+     * Stop a running task by sending ESC (interrupt) and then killing the process
+     * Returns true if task was stopped, false if task wasn't running
+     */
+    stopTask(taskId: string): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) {
+            logger.info(`stopTask: task not found`, { taskId });
+            return false;
+        }
+
+        if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
+            logger.info(`Stopping task`, { taskId, state: task.state });
+            // Send ESC to interrupt Claude first (more graceful)
+            try {
+                task.process.write('\x1b');
+            } catch (_e) {
+                // Process might already be dead
+            }
+            return true;
+        }
+
+        logger.info(`stopTask: task not in stoppable state`, { taskId, state: task.state });
+        return false;
+    }
+
+    /**
+     * Destroys a task, killing its process and removing it from all maps
+     * @param taskId - The task ID to destroy
+     */
     destroyTask(taskId: string): void {
-        console.log(`[TaskSpawner] destroyTask called for ${taskId}`);
+        logger.info(`Destroying task`, { taskId });
         let destroyed = false;
         let source = '';
 
+        // Clean up any pending session capture for this task
+        this.clearSessionCapture(taskId);
+
         const task = this.tasks.get(taskId);
         if (task) {
-            console.log(`[TaskSpawner] Found task ${taskId} in live tasks (state: ${task.state})`);
+            logger.info(`Found task in live tasks`, { taskId, state: task.state });
+
+            // If task is running, first try to stop it gracefully
+            if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
+                logger.info(`Task is running, sending interrupt first`, { taskId, state: task.state });
+                try {
+                    task.process.write('\x1b'); // Send ESC to interrupt
+                } catch (_e) {
+                    // Process might already be dead
+                }
+            }
+
             // Delete from map FIRST to prevent onExit handler from emitting state changes
             this.tasks.delete(taskId);
             try {
@@ -953,7 +1344,7 @@ export class TaskSpawner extends EventEmitter {
         }
 
         if (this.disconnectedTasks.has(taskId)) {
-            console.log(`[TaskSpawner] Found task ${taskId} in disconnected tasks`);
+            logger.info(`Found task in disconnected tasks`, { taskId });
             this.disconnectedTasks.delete(taskId);
             destroyed = true;
             source = source ? 'both' : 'disconnected';
@@ -961,11 +1352,11 @@ export class TaskSpawner extends EventEmitter {
 
         // Only emit once, regardless of which map(s) the task was in
         if (destroyed) {
-            console.log(`[TaskSpawner] Task ${taskId} destroyed from ${source}, emitting event`);
+            logger.info(`Task destroyed`, { taskId, source });
             this.scheduleSave();
             this.emit('taskDestroyed', taskId);
         } else {
-            console.log(`[TaskSpawner] Task ${taskId} not found in any map!`);
+            logger.warn(`Task not found in any map`, { taskId });
         }
     }
 
@@ -977,27 +1368,67 @@ export class TaskSpawner extends EventEmitter {
         const task = this.tasks.get(taskId);
         if (task) {
             // Convert live task to persisted format for archiving
-            const buffers: Buffer[] = [];
-            if (task.previousHistory) {
-                buffers.push(task.previousHistory);
-            }
-            buffers.push(...task.outputHistory);
-            const historyBuffer = Buffer.concat(buffers);
-            const historyBase64 = historyBuffer.toString('base64');
+            let historyBase64: string;
+            let historySize: number;
 
-            const archivedTask: PersistedTask = {
+            // Handle lazy loading case - avoid decoding if possible
+            if (task.lazyHistoryBase64 && !task.previousHistory) {
+                const currentOutputSize = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
+                if (currentOutputSize < 1024) {
+                    historyBase64 = task.lazyHistoryBase64;
+                    historySize = Math.floor(historyBase64.length * 0.75);
+                } else {
+                    const currentOutput = Buffer.concat(task.outputHistory);
+                    const lazyHistory = Buffer.from(task.lazyHistoryBase64, 'base64');
+                    historyBase64 = Buffer.concat([lazyHistory, currentOutput]).toString('base64');
+                    historySize = Math.floor(historyBase64.length * 0.75);
+                }
+            } else {
+                const buffers: Buffer[] = [];
+                if (task.previousHistory) {
+                    buffers.push(task.previousHistory);
+                }
+                buffers.push(...task.outputHistory);
+                const historyBuffer = Buffer.concat(buffers);
+                historyBase64 = historyBuffer.toString('base64');
+                historySize = historyBuffer.length;
+            }
+
+            // Save history to disk instead of keeping in memory
+            try {
+                const historyDir = this.getArchivedHistoryDir();
+                if (!existsSync(historyDir)) {
+                    mkdirSync(historyDir, { recursive: true });
+                }
+                writeFileSync(this.getArchivedHistoryPath(taskId), historyBase64);
+                console.log(`[TaskSpawner] Saved archived task history to disk: ${historySize} bytes`);
+            } catch (e) {
+                console.error(`[TaskSpawner] Failed to save archived history:`, e);
+            }
+
+            // Store only metadata in memory
+            const archivedMetadata: ArchivedTaskMetadata = {
                 id: task.id,
                 prompt: task.prompt,
                 workspaceId: task.workspaceId,
                 createdAt: task.createdAt.toISOString(),
                 lastActivity: task.lastActivity.toISOString(),
-                lastState: 'archived',
                 sessionId: task.sessionId,
-                outputHistory: historyBase64,
                 gitState: task.gitState,
                 systemPrompt: task.systemPrompt,
+                historySize,
             };
-            this.archivedTasks.set(taskId, archivedTask);
+            this.archivedTasks.set(taskId, archivedMetadata);
+
+            // If task is running, first try to stop it gracefully
+            if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
+                logger.info(`Task is running, sending interrupt before archive`, { taskId, state: task.state });
+                try {
+                    task.process.write('\x1b'); // Send ESC to interrupt
+                } catch (_e) {
+                    // Process might already be dead
+                }
+            }
 
             // Delete from map FIRST to prevent onExit handler from emitting state changes
             this.tasks.delete(taskId);
@@ -1013,9 +1444,34 @@ export class TaskSpawner extends EventEmitter {
         // Also check disconnected tasks
         const disconnected = this.disconnectedTasks.get(taskId);
         if (disconnected) {
-            // Move to archived
-            disconnected.lastState = 'archived';
-            this.archivedTasks.set(taskId, disconnected);
+            // Save history to disk
+            if (disconnected.outputHistory) {
+                try {
+                    const historyDir = this.getArchivedHistoryDir();
+                    if (!existsSync(historyDir)) {
+                        mkdirSync(historyDir, { recursive: true });
+                    }
+                    writeFileSync(this.getArchivedHistoryPath(taskId), disconnected.outputHistory);
+                    const historySize = Math.floor(disconnected.outputHistory.length * 0.75);
+                    console.log(`[TaskSpawner] Saved disconnected task history to disk: ${historySize} bytes`);
+                } catch (e) {
+                    console.error(`[TaskSpawner] Failed to save archived history:`, e);
+                }
+            }
+
+            // Store only metadata in memory
+            const archivedMetadata: ArchivedTaskMetadata = {
+                id: disconnected.id,
+                prompt: disconnected.prompt,
+                workspaceId: disconnected.workspaceId,
+                createdAt: disconnected.createdAt,
+                lastActivity: disconnected.lastActivity,
+                sessionId: disconnected.sessionId,
+                gitState: disconnected.gitState,
+                systemPrompt: disconnected.systemPrompt,
+                historySize: disconnected.outputHistory ? Math.floor(disconnected.outputHistory.length * 0.75) : 0,
+            };
+            this.archivedTasks.set(taskId, archivedMetadata);
             this.disconnectedTasks.delete(taskId);
             archived = true;
         }
@@ -1054,10 +1510,45 @@ export class TaskSpawner extends EventEmitter {
             return null;
         }
 
+        // Load history from disk
+        let outputHistory: string | undefined;
+        const historyPath = this.getArchivedHistoryPath(taskId);
+        if (existsSync(historyPath)) {
+            try {
+                outputHistory = readFileSync(historyPath, 'utf-8');
+                console.log(`[TaskSpawner] Loaded archived history from disk: ${archived.historySize || 0} bytes`);
+            } catch (e) {
+                console.error(`[TaskSpawner] Failed to load archived history:`, e);
+            }
+        }
+
+        // Convert metadata to PersistedTask for disconnectedTasks
+        const persistedTask: PersistedTask = {
+            id: archived.id,
+            prompt: archived.prompt,
+            workspaceId: archived.workspaceId,
+            createdAt: archived.createdAt,
+            lastActivity: archived.lastActivity,
+            lastState: 'disconnected',
+            sessionId: archived.sessionId,
+            outputHistory,
+            gitState: archived.gitState,
+            systemPrompt: archived.systemPrompt,
+        };
+
         // Move from archived to disconnected
-        archived.lastState = 'disconnected';
-        this.disconnectedTasks.set(taskId, archived);
+        this.disconnectedTasks.set(taskId, persistedTask);
         this.archivedTasks.delete(taskId);
+
+        // Delete history file since it's now in disconnectedTasks
+        if (existsSync(historyPath)) {
+            try {
+                unlinkSync(historyPath);
+            } catch (e) {
+                console.error(`[TaskSpawner] Failed to delete archived history file:`, e);
+            }
+        }
+
         this.scheduleSave();
 
         console.log(`[TaskSpawner] Restored archived task ${taskId} to disconnected state`);
@@ -1076,11 +1567,47 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Continue an archived task - restores it and immediately reconnects it
+     * This is a convenience method that combines restore + reconnect
+     */
+    continueArchivedTask(taskId: string): Task | null {
+        // Use restoreArchivedTask which handles loading history from disk
+        const restoredTask = this.restoreArchivedTask(taskId);
+        if (!restoredTask) {
+            return null;
+        }
+
+        console.log(`[TaskSpawner] Continuing archived task ${taskId}`);
+
+        // Now reconnect the task
+        const reconnectedTask = this.reconnectTask(taskId);
+        if (!reconnectedTask) {
+            console.log(`[TaskSpawner] Failed to reconnect archived task ${taskId}`);
+            // If reconnection fails, it stays in disconnected state
+            return restoredTask;
+        }
+
+        return reconnectedTask;
+    }
+
+    /**
      * Permanently delete an archived task
      */
     deleteArchivedTask(taskId: string): boolean {
         if (this.archivedTasks.has(taskId)) {
             this.archivedTasks.delete(taskId);
+
+            // Also delete history file from disk
+            const historyPath = this.getArchivedHistoryPath(taskId);
+            if (existsSync(historyPath)) {
+                try {
+                    unlinkSync(historyPath);
+                    console.log(`[TaskSpawner] Deleted archived history file for ${taskId}`);
+                } catch (e) {
+                    console.error(`[TaskSpawner] Failed to delete archived history file:`, e);
+                }
+            }
+
             this.scheduleSave();
             console.log(`[TaskSpawner] Permanently deleted archived task ${taskId}`);
             return true;
@@ -1128,25 +1655,26 @@ export class TaskSpawner extends EventEmitter {
             console.log(`[TaskSpawner] Reconnecting task ${taskId} (fresh start)`);
         }
 
+        // Get environment with API mode settings
+        const taskEnv = this.getTaskEnvironment();
+
         const ptyProcess = spawn('claude', claudeArgs, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,
             cwd: persisted.workspaceId,
-            env: process.env as { [key: string]: string },
+            env: taskEnv,
         });
 
         const now = new Date();
 
-        // Restore previous history as a separate buffer (not mixed with live output)
-        let previousHistory: Buffer | undefined;
-        if (persisted.outputHistory) {
-            try {
-                previousHistory = Buffer.from(persisted.outputHistory, 'base64');
-                console.log(`[TaskSpawner] Restored ${previousHistory.length} bytes of history`);
-            } catch (_e) {
-                console.error(`[TaskSpawner] Failed to restore history`);
-            }
+        // Use lazy loading for history to prevent memory exhaustion during startup
+        // History will be decoded only when task is selected (setTaskActive)
+        const lazyHistoryBase64 = persisted.outputHistory || undefined;
+        if (lazyHistoryBase64) {
+            // Estimate size from base64 (base64 is ~4/3 the size of binary)
+            const estimatedSize = Math.floor(lazyHistoryBase64.length * 0.75);
+            console.log(`[TaskSpawner] Deferred loading ~${estimatedSize} bytes of history (lazy load)`);
         }
 
         // Create a separator message for the live output stream
@@ -1154,21 +1682,30 @@ export class TaskSpawner extends EventEmitter {
             ? `\r\n\x1b[90m─── Resuming session ${persisted.sessionId} ───\x1b[0m\r\n\r\n`
             : `\r\n\x1b[90m─── Session reconnected ───\x1b[0m\r\n\r\n`;
 
+        // Check if this task should auto-continue after reconnection
+        const shouldContinue = persisted.shouldContinue && persisted.sessionId != null;
+        if (shouldContinue) {
+            logger.info(`Task was interrupted, will auto-continue`, { taskId });
+        }
+
         const task: InternalTask = {
             id: persisted.id,
             prompt: persisted.prompt,
             workspaceId: persisted.workspaceId,
             process: ptyProcess,
-            state: 'idle',  // Start as idle on reconnect
+            state: shouldContinue ? 'starting' : 'idle',  // 'starting' if we need to send continuation
             outputHistory: [Buffer.from(resumeMessage)], // Start fresh, only resume message
-            previousHistory, // Keep historical output separate
+            lazyHistoryBase64, // Store base64 for lazy loading instead of decoding now
             lastActivity: now,
             createdAt: new Date(persisted.createdAt),
             isActive: false,
-            initialPromptSent: true,
-            pendingPrompt: null,
+            initialPromptSent: !shouldContinue,  // False if we need to send continuation prompt
+            pendingPrompt: shouldContinue ? 'continue' : null,  // Trigger continuation
             sessionId: persisted.sessionId,
             lastOutputLength: resumeMessage.length,  // Initialize for state polling
+            hasStartedProcessing: !shouldContinue,  // Will be set true when continuation starts
+            shouldContinue,
+            continuationSent: false,
         };
 
         this.setupProcessHandlers(task);
@@ -1184,11 +1721,16 @@ export class TaskSpawner extends EventEmitter {
     destroy(): void {
         this.saveTasks();
 
-        // Clean up all idle timers
-        for (const timer of this.outputIdleTimers.values()) {
-            clearTimeout(timer);
+        // Stop state polling
+        if (this.statePollingInterval) {
+            clearInterval(this.statePollingInterval);
+            this.statePollingInterval = null;
         }
-        this.outputIdleTimers.clear();
+
+        // Clean up all session capture intervals to prevent memory leaks
+        for (const taskId of this.sessionCaptureIntervals.keys()) {
+            this.clearSessionCapture(taskId);
+        }
 
         for (const task of this.tasks.values()) {
             try {

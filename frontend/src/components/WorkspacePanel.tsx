@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play
 } from 'lucide-react';
 import './WorkspacePanel.css';
 
@@ -36,6 +36,16 @@ interface StateIconProps {
 }
 
 function StateIcon({ task, hasActiveQuestion, onArchive }: StateIconProps) {
+    // Show play icon for tasks that haven't actually started yet
+    // This indicates the user may need to press Enter manually
+    if (task.state === 'starting') {
+        return (
+            <span title="Waiting to start - may need Enter key">
+                <Play className="status-icon starting" size={14} />
+            </span>
+        );
+    }
+
     if (task.state === 'busy') {
         return <Loader2 className="status-icon spinning" size={14} />;
     }
@@ -355,11 +365,12 @@ function WorkspaceSection({
 
 interface ArchivedTaskItemProps {
     task: Task;
+    onContinue: (taskId: string) => void;
     onRestore: (taskId: string) => void;
     onDelete: (taskId: string) => void;
 }
 
-function ArchivedTaskItem({ task, onRestore, onDelete }: ArchivedTaskItemProps) {
+function ArchivedTaskItem({ task, onContinue, onRestore, onDelete }: ArchivedTaskItemProps) {
     // Split prompt by ⏺ dots and get the last segment for display
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
     const lastSegment = segments.length > 0 ? segments[segments.length - 1] : task.prompt;
@@ -367,8 +378,16 @@ function ArchivedTaskItem({ task, onRestore, onDelete }: ArchivedTaskItemProps) 
     // Format date
     const archivedDate = new Date(task.lastActivity).toLocaleDateString();
 
+    const handleClick = (e: React.MouseEvent) => {
+        // Don't trigger if clicking on action buttons
+        if ((e.target as HTMLElement).closest('.archived-task-actions')) {
+            return;
+        }
+        onContinue(task.id);
+    };
+
     return (
-        <div className="archived-task-item">
+        <div className="archived-task-item" onClick={handleClick}>
             <div className="archived-task-info">
                 <span className="archived-task-prompt" title={task.prompt}>{lastSegment}</span>
                 <span className="archived-task-date">{archivedDate}</span>
@@ -377,7 +396,7 @@ function ArchivedTaskItem({ task, onRestore, onDelete }: ArchivedTaskItemProps) 
                 <button
                     className="task-action-button restore"
                     onClick={() => onRestore(task.id)}
-                    title="Restore task"
+                    title="Restore to task list (without opening)"
                 >
                     <RotateCcw size={12} />
                 </button>
@@ -410,6 +429,7 @@ interface WorkspacePanelProps {
     onRequestArchivedTasks?: () => void;
     onRestoreArchivedTask?: (taskId: string) => void;
     onDeleteArchivedTask?: (taskId: string) => void;
+    onContinueArchivedTask?: (taskId: string) => void;
 }
 
 export function WorkspacePanel({
@@ -423,7 +443,8 @@ export function WorkspacePanel({
     onSelectTask,
     onRequestArchivedTasks,
     onRestoreArchivedTask,
-    onDeleteArchivedTask
+    onDeleteArchivedTask,
+    onContinueArchivedTask
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -540,6 +561,7 @@ export function WorkspacePanel({
                                 <ArchivedTaskItem
                                     key={task.id}
                                     task={task}
+                                    onContinue={onContinueArchivedTask || (() => {})}
                                     onRestore={onRestoreArchivedTask || (() => {})}
                                     onDelete={onDeleteArchivedTask || (() => {})}
                                 />

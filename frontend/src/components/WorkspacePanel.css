@@ -324,6 +324,12 @@
     padding-left: 12px;
 }
 
+/* Task List - Scrollable with max 5 items visible */
+.task-list {
+    max-height: calc(5 * 32px); /* ~32px per task item (padding + line height) */
+    overflow-y: auto;
+}
+
 .empty-tasks {
     padding: 8px 12px;
     font-size: 0.75rem;
@@ -390,6 +396,16 @@
 .workspace-panel .status-icon.spinning {
     animation: spin 1s linear infinite;
     color: var(--accent-secondary);
+}
+
+.workspace-panel .status-icon.starting {
+    color: var(--accent-orange, #ff9500);
+    animation: pulse-starting 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-starting {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(0.9); }
 }
 
 .workspace-panel .status-icon.complete {
@@ -877,10 +893,16 @@
     padding: 8px 16px;
     border-top: 1px solid var(--border-color);
     background: var(--bg-secondary);
+    cursor: pointer;
+    transition: background 0.15s ease;
 }
 
 .archived-task-item:hover {
     background: var(--bg-tertiary);
+}
+
+.archived-task-item:active {
+    background: var(--bg-primary);
 }
 
 .archived-task-info {

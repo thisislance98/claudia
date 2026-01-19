@@ -25,6 +25,9 @@ export interface AICoreCredentials {
     timeoutMs: number;
 }
 
+// API mode determines how Claude Code connects to Anthropic's API
+export type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core';
+
 export interface AppConfig {
     mcpServers: MCPServerConfig[];
     skipPermissions: boolean;
@@ -33,6 +36,8 @@ export interface AppConfig {
     supervisorSystemPrompt: string;
     autoFocusOnInput: boolean;  // Auto-switch to task when it needs input
     aiCoreCredentials?: AICoreCredentials;  // SAP AI Core credentials for Anthropic proxy
+    apiMode: ApiMode;  // Which API connection mode to use
+    customAnthropicApiKey?: string;  // API key for custom-anthropic mode
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are an AI supervisor monitoring coding tasks. Your job is to:
@@ -48,13 +53,24 @@ When a task completes, analyze the conversation and determine if:
 
 If everything looks good, just confirm the task is complete. If issues exist, suggest specific next steps.`;
 
+// Default MCP servers that are included out-of-the-box
+const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
+    {
+        name: 'playwright',
+        command: 'npx',
+        args: ['@playwright/mcp'],
+        enabled: true
+    }
+];
+
 const DEFAULT_CONFIG: AppConfig = {
-    mcpServers: [],
+    mcpServers: DEFAULT_MCP_SERVERS,
     skipPermissions: false,
     rules: '',
     supervisorEnabled: false,
     supervisorSystemPrompt: DEFAULT_SUPERVISOR_PROMPT,
-    autoFocusOnInput: false
+    autoFocusOnInput: false,
+    apiMode: 'default'
 };
 
 export class ConfigStore {
@@ -79,13 +95,16 @@ export class ConfigStore {
                 const data = readFileSync(this.configFile, 'utf-8');
                 const loaded = JSON.parse(data) as Partial<AppConfig>;
                 return {
-                    mcpServers: loaded.mcpServers || [],
+                    // Use defaults if mcpServers is undefined or empty array
+                    mcpServers: (loaded.mcpServers && loaded.mcpServers.length > 0) ? loaded.mcpServers : DEFAULT_MCP_SERVERS,
                     skipPermissions: loaded.skipPermissions ?? false,
                     rules: loaded.rules ?? '',
                     supervisorEnabled: loaded.supervisorEnabled ?? false,
                     supervisorSystemPrompt: loaded.supervisorSystemPrompt ?? DEFAULT_SUPERVISOR_PROMPT,
                     autoFocusOnInput: loaded.autoFocusOnInput ?? false,
-                    aiCoreCredentials: loaded.aiCoreCredentials
+                    aiCoreCredentials: loaded.aiCoreCredentials,
+                    apiMode: loaded.apiMode ?? 'default',
+                    customAnthropicApiKey: loaded.customAnthropicApiKey
                 };
             }
         } catch (error) {
@@ -130,6 +149,12 @@ export class ConfigStore {
         if (updates.aiCoreCredentials !== undefined) {
             this.config.aiCoreCredentials = updates.aiCoreCredentials;
         }
+        if (updates.apiMode !== undefined) {
+            this.config.apiMode = updates.apiMode;
+        }
+        if (updates.customAnthropicApiKey !== undefined) {
+            this.config.customAnthropicApiKey = updates.customAnthropicApiKey;
+        }
         this.saveConfig();
         return this.getConfig();
     }
@@ -141,6 +166,14 @@ export class ConfigStore {
     setAICoreCredentials(credentials: AICoreCredentials | undefined): void {
         this.config.aiCoreCredentials = credentials;
         this.saveConfig();
+    }
+
+    getApiMode(): ApiMode {
+        return this.config.apiMode;
+    }
+
+    getCustomAnthropicApiKey(): string | undefined {
+        return this.config.customAnthropicApiKey;
     }
 
     isSupervisorEnabled(): boolean {

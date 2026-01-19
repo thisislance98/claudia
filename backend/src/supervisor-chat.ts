@@ -122,11 +122,21 @@ const TOOLS: ToolDefinition[] = [
 
 // Path for chat history persistence
 const CHAT_HISTORY_FILE = join(__dirname, '..', 'chat-history.json');
-const MAX_HISTORY_MESSAGES = 200; // Limit history to prevent unbounded growth
+/** Maximum number of chat messages to retain in memory and on disk */
+const MAX_HISTORY_MESSAGES = 200;
 
 // Rate limiting for Claude process spawning
 const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
 const MAX_SPAWNS_PER_WINDOW = 10; // Max Claude processes per window
+
+// Concurrency control for auto-analysis
+const MAX_CONCURRENT_ANALYSIS = 2; // Max concurrent Claude processes for analysis
+
+// Queue item for auto-analysis
+interface AnalysisQueueItem {
+    task: { id: string; prompt: string; state: string; workspaceId: string; createdAt: Date; lastActivity: Date };
+    resolve: () => void;
+}
 
 export class SupervisorChat extends EventEmitter {
     private taskSpawner: TaskSpawner;
@@ -137,6 +147,8 @@ export class SupervisorChat extends EventEmitter {
     private processingTasks: Set<string> = new Set();  // Prevent duplicate auto-analysis
     private saveDebounceTimer: NodeJS.Timeout | null = null;
     private spawnTimestamps: number[] = [];  // Track spawn timestamps for rate limiting
+    private analysisQueue: AnalysisQueueItem[] = [];  // Queue for pending analysis
+    private activeAnalysisCount: number = 0;  // Current number of running analyses
 
     constructor(
         taskSpawner: TaskSpawner,
@@ -172,6 +184,21 @@ export class SupervisorChat extends EventEmitter {
             console.error('[SupervisorChat] Failed to load chat history:', error);
             this.chatHistory = [];
         }
+    }
+
+    /**
+     * Add a message to chat history with automatic trimming
+     * Immediately trims if over limit to prevent unbounded growth
+     * @param message - The message to add
+     */
+    private addMessage(message: ChatMessage): void {
+        this.chatHistory.push(message);
+        // Trim immediately if over limit to prevent unbounded in-memory growth
+        if (this.chatHistory.length > MAX_HISTORY_MESSAGES) {
+            this.chatHistory = this.chatHistory.slice(-MAX_HISTORY_MESSAGES);
+        }
+        this.saveChatHistory();
+        this.emit('message', message);
     }
 
     /**
@@ -265,14 +292,31 @@ export class SupervisorChat extends EventEmitter {
             taskId: task.id
         };
 
-        this.chatHistory.push(message);
-        this.saveChatHistory();
-        this.emit('message', message);
+        this.addMessage(message);
+    }
+
+    /**
+     * Process the next item in the analysis queue if we have capacity
+     */
+    private processAnalysisQueue(): void {
+        while (this.analysisQueue.length > 0 && this.activeAnalysisCount < MAX_CONCURRENT_ANALYSIS) {
+            const item = this.analysisQueue.shift();
+            if (item) {
+                this.activeAnalysisCount++;
+                this.runAnalysis(item.task).finally(() => {
+                    this.activeAnalysisCount--;
+                    item.resolve();
+                    // Check queue for more items
+                    this.processAnalysisQueue();
+                });
+            }
+        }
     }
 
     /**
      * Auto-analyze a task when its state changes (idle/waiting_input/exited)
      * Posts the analysis as a chat message
+     * Uses a queue with concurrency limit to prevent spawning too many Claude processes
      */
     async autoAnalyzeTask(task: Task): Promise<void> {
         // Prevent duplicate processing
@@ -283,6 +327,29 @@ export class SupervisorChat extends EventEmitter {
 
         this.processingTasks.add(task.id);
 
+        // If at capacity, queue the analysis
+        if (this.activeAnalysisCount >= MAX_CONCURRENT_ANALYSIS) {
+            console.log(`[SupervisorChat] Analysis queue: ${this.analysisQueue.length + 1} pending (${this.activeAnalysisCount} active)`);
+            await new Promise<void>((resolve) => {
+                this.analysisQueue.push({ task, resolve });
+            });
+            return; // Analysis will run via queue
+        }
+
+        // Run immediately
+        this.activeAnalysisCount++;
+        try {
+            await this.runAnalysis(task);
+        } finally {
+            this.activeAnalysisCount--;
+            this.processAnalysisQueue();
+        }
+    }
+
+    /**
+     * Run the actual analysis for a task
+     */
+    private async runAnalysis(task: { id: string; prompt: string; state: string; workspaceId: string; createdAt: Date; lastActivity: Date }): Promise<void> {
         try {
             // Get task conversation history
             const internalTask = this.taskSpawner.getTask(task.id);
@@ -337,9 +404,7 @@ Keep your response concise and actionable.`;
                 taskId: task.id
             };
 
-            this.chatHistory.push(assistantMessage);
-            this.saveChatHistory();
-            this.emit('message', assistantMessage);
+            this.addMessage(assistantMessage);
 
             console.log(`[SupervisorChat] Auto-analysis complete for task ${task.id}`);
         } catch (error) {
@@ -353,9 +418,7 @@ Keep your response concise and actionable.`;
                 timestamp: new Date().toISOString(),
                 taskId: task.id
             };
-            this.chatHistory.push(fallbackMessage);
-            this.saveChatHistory();
-            this.emit('message', fallbackMessage);
+            this.addMessage(fallbackMessage);
         } finally {
             this.processingTasks.delete(task.id);
         }
@@ -468,9 +531,7 @@ Keep your response concise and actionable.`;
                 timestamp: new Date().toISOString(),
                 taskId
             };
-            this.chatHistory.push(userMessage);
-            this.saveChatHistory();
-            this.emit('message', userMessage);
+            this.addMessage(userMessage);
 
             // Get context about tasks
             const context = await this.buildContext(taskId);
@@ -501,9 +562,7 @@ Keep your response concise and actionable.`;
                 timestamp: new Date().toISOString(),
                 taskId
             };
-            this.chatHistory.push(assistantMessage);
-            this.saveChatHistory();
-            this.emit('message', assistantMessage);
+            this.addMessage(assistantMessage);
 
             return assistantMessage;
         } catch (error) {
@@ -517,9 +576,7 @@ Keep your response concise and actionable.`;
                 timestamp: new Date().toISOString(),
                 taskId
             };
-            this.chatHistory.push(errorMessage);
-            this.saveChatHistory();
-            this.emit('message', errorMessage);
+            this.addMessage(errorMessage);
 
             return errorMessage;
         } finally {

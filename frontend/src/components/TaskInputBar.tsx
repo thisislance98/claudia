@@ -34,6 +34,20 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         }
     }, [message]);
 
+    // Listen for focus request events (when task is selected)
+    useEffect(() => {
+        const handleFocusRequest = (e: CustomEvent<{ taskId: string }>) => {
+            if (e.detail.taskId === task.id && inputRef.current) {
+                inputRef.current.focus();
+            }
+        };
+
+        window.addEventListener('taskInput:focus', handleFocusRequest as EventListener);
+        return () => {
+            window.removeEventListener('taskInput:focus', handleFocusRequest as EventListener);
+        };
+    }, [task.id]);
+
     // Append voice transcript to message when this input is focused
     useEffect(() => {
         if (isFocused && voiceTranscript) {

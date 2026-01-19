@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType } from '@claudia/shared';
 
 // Info about a task that is waiting for user input
@@ -119,7 +120,32 @@ interface TaskStore {
     setAiCoreConfigured: (configured: boolean | null) => void;
 }
 
-export const useTaskStore = create<TaskStore>((set, get) => ({
+// Storage key for localStorage
+const STORAGE_KEY = 'claudia-task-store';
+
+// State that should be persisted (UI preferences and settings)
+interface PersistedState {
+    selectedTaskId: string | null;
+    showArchivedTasks: boolean;
+    expandedWorkspaces: string[];  // Stored as array, converted to Set
+    voiceEnabled: boolean;
+    autoSpeakResponses: boolean;
+    selectedVoiceName: string | null;
+    voiceRate: number;
+    voicePitch: number;
+    voiceVolume: number;
+    globalVoiceEnabled: boolean;
+    autoSendEnabled: boolean;
+    autoSendDelayMs: number;
+    autoFocusOnInput: boolean;
+    supervisorEnabled: boolean;
+    taskSummaries: [string, TaskSummary][];  // Stored as entries array
+    chatMessages: ChatMessage[];
+}
+
+export const useTaskStore = create<TaskStore>()(
+    persist(
+        (set, get) => ({
     // Initial state
     tasks: new Map(),
     archivedTasks: [],
@@ -192,6 +218,8 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
 
     addTask: (task) => {
         const { tasks } = get();
+        // Create new Map and add/update task
+        // (Same logic whether task exists or not)
         const newTasks = new Map(tasks);
         newTasks.set(task.id, task);
         set({ tasks: newTasks });
@@ -199,6 +227,17 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
 
     updateTask: (task) => {
         const { tasks } = get();
+        const existing = tasks.get(task.id);
+
+        // Skip update if task state hasn't meaningfully changed
+        // This prevents unnecessary re-renders when rapid updates arrive
+        if (existing &&
+            existing.state === task.state &&
+            existing.waitingInputType === task.waitingInputType &&
+            existing.lastActivity?.getTime?.() === task.lastActivity?.getTime?.()) {
+            return; // No change, skip update
+        }
+
         const newTasks = new Map(tasks);
         newTasks.set(task.id, task);
         set({ tasks: newTasks });
@@ -222,8 +261,28 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
 
     // Workspace actions
     setWorkspaces: (workspaces) => {
-        const expandedWorkspaces = new Set(workspaces.map(w => w.id));
-        set({ workspaces, expandedWorkspaces });
+        const { expandedWorkspaces: currentExpanded } = get();
+        // Keep existing expanded state, only add new workspaces as expanded
+        const newExpanded = new Set(currentExpanded);
+        // If this is the first load (no expanded workspaces), expand all
+        if (currentExpanded.size === 0) {
+            workspaces.forEach(w => newExpanded.add(w.id));
+        } else {
+            // Add any new workspaces as expanded
+            workspaces.forEach(w => {
+                if (!currentExpanded.has(w.id)) {
+                    newExpanded.add(w.id);
+                }
+            });
+        }
+        // Remove any workspaces that no longer exist
+        const workspaceIds = new Set(workspaces.map(w => w.id));
+        for (const id of newExpanded) {
+            if (!workspaceIds.has(id)) {
+                newExpanded.delete(id);
+            }
+        }
+        set({ workspaces, expandedWorkspaces: newExpanded });
     },
 
     addWorkspace: (workspace) => {
@@ -347,4 +406,58 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     setAutoFocusOnInput: (enabled) => set({ autoFocusOnInput: enabled }),
     setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled }),
     setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured })
-}));
+        }),
+        {
+            name: STORAGE_KEY,
+            storage: createJSONStorage(() => localStorage),
+            // Only persist UI preferences and settings, not transient state
+            partialize: (state): PersistedState => ({
+                selectedTaskId: state.selectedTaskId,
+                showArchivedTasks: state.showArchivedTasks,
+                expandedWorkspaces: Array.from(state.expandedWorkspaces),
+                voiceEnabled: state.voiceEnabled,
+                autoSpeakResponses: state.autoSpeakResponses,
+                selectedVoiceName: state.selectedVoiceName,
+                voiceRate: state.voiceRate,
+                voicePitch: state.voicePitch,
+                voiceVolume: state.voiceVolume,
+                globalVoiceEnabled: state.globalVoiceEnabled,
+                autoSendEnabled: state.autoSendEnabled,
+                autoSendDelayMs: state.autoSendDelayMs,
+                autoFocusOnInput: state.autoFocusOnInput,
+                supervisorEnabled: state.supervisorEnabled,
+                taskSummaries: Array.from(state.taskSummaries.entries()),
+                chatMessages: state.chatMessages,
+            }),
+            // Merge persisted state with initial state, converting arrays back to Set/Map
+            merge: (persistedState, currentState) => {
+                const persisted = persistedState as PersistedState | undefined;
+                if (!persisted) return currentState;
+
+                return {
+                    ...currentState,
+                    selectedTaskId: persisted.selectedTaskId ?? currentState.selectedTaskId,
+                    showArchivedTasks: persisted.showArchivedTasks ?? currentState.showArchivedTasks,
+                    expandedWorkspaces: persisted.expandedWorkspaces
+                        ? new Set(persisted.expandedWorkspaces)
+                        : currentState.expandedWorkspaces,
+                    voiceEnabled: persisted.voiceEnabled ?? currentState.voiceEnabled,
+                    autoSpeakResponses: persisted.autoSpeakResponses ?? currentState.autoSpeakResponses,
+                    selectedVoiceName: persisted.selectedVoiceName ?? currentState.selectedVoiceName,
+                    voiceRate: persisted.voiceRate ?? currentState.voiceRate,
+                    voicePitch: persisted.voicePitch ?? currentState.voicePitch,
+                    voiceVolume: persisted.voiceVolume ?? currentState.voiceVolume,
+                    globalVoiceEnabled: persisted.globalVoiceEnabled ?? currentState.globalVoiceEnabled,
+                    autoSendEnabled: persisted.autoSendEnabled ?? currentState.autoSendEnabled,
+                    autoSendDelayMs: persisted.autoSendDelayMs ?? currentState.autoSendDelayMs,
+                    autoFocusOnInput: persisted.autoFocusOnInput ?? currentState.autoFocusOnInput,
+                    supervisorEnabled: persisted.supervisorEnabled ?? currentState.supervisorEnabled,
+                    taskSummaries: persisted.taskSummaries
+                        ? new Map(persisted.taskSummaries)
+                        : currentState.taskSummaries,
+                    chatMessages: persisted.chatMessages ?? currentState.chatMessages,
+                };
+            },
+        }
+    )
+);

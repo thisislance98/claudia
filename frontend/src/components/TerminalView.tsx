@@ -17,6 +17,7 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
+    const resizeDebounceRef = useRef<number | null>(null);
     const [copied, setCopied] = useState(false);
 
     // Expose scrollToBottom for external use
@@ -30,6 +31,7 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
     useEffect(() => {
         const handleScrollToBottom = (e: CustomEvent<{ taskId: string }>) => {
             if (e.detail.taskId === task.id) {
+                console.log(`[TerminalView] Received scrollToBottom event for ${task.id}`);
                 scrollToBottom();
             }
         };
@@ -135,7 +137,7 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
 
-        // Helper to safely fit terminal
+        // Helper to safely fit terminal (with debouncing for resize events)
         const fitTerminal = () => {
             if (!fitAddonRef.current || !terminalRef.current || !xtermRef.current) return;
 
@@ -151,6 +153,17 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
             }
         };
 
+        // Debounced version for resize events (prevents excessive calls during drag resize)
+        const debouncedFitTerminal = () => {
+            if (resizeDebounceRef.current) {
+                window.clearTimeout(resizeDebounceRef.current);
+            }
+            resizeDebounceRef.current = window.setTimeout(() => {
+                fitTerminal();
+                resizeDebounceRef.current = null;
+            }, 100); // 100ms debounce
+        };
+
         // Initial fit with a small delay to ensure container has dimensions
         requestAnimationFrame(() => {
             fitTerminal();
@@ -161,14 +174,15 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
         });
 
         // Use ResizeObserver to detect container size changes (more reliable than window resize)
+        // Use debounced version to prevent excessive calls during drag resize
         const resizeObserver = new ResizeObserver(() => {
-            fitTerminal();
+            debouncedFitTerminal();
         });
         resizeObserver.observe(terminalRef.current);
 
         // Also handle window resize as fallback
         const handleResize = () => {
-            fitTerminal();
+            debouncedFitTerminal();
         };
         window.addEventListener('resize', handleResize);
 
@@ -185,12 +199,21 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
                 } else if (message.type === 'task:restore') {
                     const { taskId, history } = message.payload;
                     if (taskId === task.id && history) {
+                        console.log(`[TerminalView] Received task:restore for ${taskId}, history length: ${history.length}`);
                         // Write history - it goes into scrollback buffer
                         // Claude's TUI will redraw the screen but history remains scrollable
-                        term.write(history);
-                        // Scroll to bottom to show current state after rendering completes
-                        requestAnimationFrame(() => {
+                        term.write(history, () => {
+                            console.log(`[TerminalView] History write complete for ${taskId}, scrolling to bottom`);
+                            // Callback fires after write is fully processed
+                            // Use multiple scroll attempts to ensure we catch the final position
                             term.scrollToBottom();
+                            requestAnimationFrame(() => {
+                                term.scrollToBottom();
+                            });
+                            // Extra scroll after a short delay for large histories
+                            setTimeout(() => {
+                                term.scrollToBottom();
+                            }, 100);
                         });
                     }
                 }
@@ -218,32 +241,34 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
             if (wsRef.current) {
                 wsRef.current.removeEventListener('message', handleMessage);
             }
+            // Clear any pending resize debounce
+            if (resizeDebounceRef.current) {
+                window.clearTimeout(resizeDebounceRef.current);
+                resizeDebounceRef.current = null;
+            }
             term.dispose();
             xtermRef.current = null;
             fitAddonRef.current = null;
         };
     }, [task.id, wsRef]);
 
-    // Refit on task change
+    // Refit on task ID change (when switching between tasks)
     useEffect(() => {
         if (fitAddonRef.current && terminalRef.current) {
             // Check if container has valid dimensions
             if (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
-                try {
-                    // Use a small timeout to let layout settle
-                    setTimeout(() => {
-                        try {
-                            fitAddonRef.current?.fit();
-                        } catch (e) {
-                            // Ignore fit errors during task switch
-                        }
-                    }, 0);
-                } catch (e) {
-                    // Ignore immediate fit errors
-                }
+                // Use a small timeout to let layout settle after task switch
+                const timeoutId = setTimeout(() => {
+                    try {
+                        fitAddonRef.current?.fit();
+                    } catch (e) {
+                        // Ignore fit errors during task switch
+                    }
+                }, 0);
+                return () => clearTimeout(timeoutId);
             }
         }
-    }, [task]);
+    }, [task.id]);
 
     // Handle Resume button click - sends task:reconnect message to spawn new Claude process
     const handleResume = () => {

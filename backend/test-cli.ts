@@ -45,7 +45,9 @@ interface TestConfig {
     listArchivedTasks: boolean;  // List all archived tasks
     restoreArchivedTask: boolean;  // Restore an archived task
     deleteArchivedTask: boolean;   // Delete an archived task permanently
+    continueArchivedTask: boolean; // Continue an archived task (restore + reconnect)
     watchTask: boolean;           // Watch task state changes
+    archiveTask: boolean;         // Archive a task
 }
 
 class TestCLI {
@@ -171,10 +173,17 @@ class TestCLI {
                     // Delete archived task permanently
                     this.sendDeleteArchivedTask(this.config.taskId);
                     setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.continueArchivedTask && this.config.taskId) {
+                    // Continue archived task (restore + reconnect)
+                    this.sendContinueArchivedTask(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 2000);
                 } else if (this.config.watchTask) {
                     // Watch task state changes - don't auto-close
                     console.log('👁️  Watching task state changes... (Ctrl+C to exit)');
                     console.log('');
+                } else if (this.config.archiveTask && this.config.taskId) {
+                    this.sendArchiveTask(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 2000);
                 } else {
                     this.sendMessage(this.config.testMessage, this.config.imagePath || undefined);
                 }
@@ -328,7 +337,7 @@ class TestCLI {
         }
 
         const message = {
-            type: 'task:stop',
+            type: 'task:interrupt',
             payload: { taskId }
         };
 
@@ -343,7 +352,7 @@ class TestCLI {
         }
 
         const message = {
-            type: 'task:delete',
+            type: 'task:destroy',
             payload: { taskId }
         };
 
@@ -531,6 +540,36 @@ class TestCLI {
         this.ws.send(JSON.stringify(message));
     }
 
+    private sendContinueArchivedTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot continue archived task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:archived:continue',
+            payload: { taskId }
+        };
+
+        console.log(`▶️  Continuing archived task ${taskId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendArchiveTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot archive task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:archive',
+            payload: { taskId }
+        };
+
+        console.log(`📦 Archiving task ${taskId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
     private listTasks(): void {
         console.log('');
         console.log('📋 TASK LIST');
@@ -570,7 +609,7 @@ class TestCLI {
                 }[task.status] || '❓';
 
                 console.log(`  ${statusIcon} [${task.id.substring(0, 8)}...] ${task.name}`);
-                console.log(`     Status: ${task.status}`);
+                console.log(`     Status: ${task.status || (task as any).state}`);
                 if (task.parentId) {
                     console.log(`     Parent: ${task.parentId.substring(0, 8)}...`);
                 }
@@ -712,6 +751,10 @@ class TestCLI {
 
             case 'task:archived:deleted':
                 this.handleArchivedTaskDeleted(message.payload as { taskId: string; success: boolean });
+                break;
+
+            case 'task:archived:continued':
+                this.handleArchivedTaskContinued(message.payload as { task: Task });
                 break;
 
             case 'task:stateChanged':
@@ -887,6 +930,15 @@ class TestCLI {
         }
     }
 
+    private handleArchivedTaskContinued(payload: { task: Task }): void {
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        const task = payload.task;
+        console.log(`[${elapsed}s] CONTINUED │ Task ${task.id} restored and reconnected`);
+        console.log(`     Prompt: ${task.prompt?.substring(0, 50)}...`);
+        console.log(`     State: ${task.state}`);
+        this.tasks.set(task.id, task);
+    }
+
     private handleTaskStateChanged(payload: { task: Task }): void {
         const task = payload.task;
         this.tasks.set(task.id, task);
@@ -895,6 +947,7 @@ class TestCLI {
 
         // State icons
         const stateIcon: Record<string, string> = {
+            'starting': '▶️',
             'busy': '🔄',
             'idle': '✅',
             'waiting_input': '❓',
@@ -1047,7 +1100,10 @@ function parseArgs(): TestConfig {
     let listArchivedTasks = false;
     let restoreArchivedTask = false;
     let deleteArchivedTask = false;
+    let continueArchivedTask = false;
+
     let watchTask = false;
+    let archiveTask = false;
 
     for (let i = 0; i < args.length; i++) {
         switch (args[i]) {
@@ -1159,6 +1215,15 @@ function parseArgs(): TestConfig {
             case '--delete-archived':
                 deleteArchivedTask = true;
                 break;
+            case '--continue-archived':
+                continueArchivedTask = true;
+                break;
+            case '--watch-task':
+                watchTask = true;
+                break;
+            case '--archive-task':
+                archiveTask = true;
+                break;
             case '--help':
             case '-h':
                 console.log(`
@@ -1186,10 +1251,12 @@ TASK OPERATIONS:
   --clear-tasks            Clear all tasks
   --list-tasks             List all tasks with their status
   --view-files             View code files for a task (requires --task-id)
+  --archive-task           Archive a task (requires --task-id)
 
 ARCHIVED TASK OPERATIONS:
   --list-archived          List all archived tasks
   --restore-archived       Restore an archived task (requires --task-id)
+  --continue-archived      Continue an archived task - restores and reconnects (requires --task-id)
   --delete-archived        Permanently delete an archived task (requires --task-id)
 
 WORKSPACE OPERATIONS:
@@ -1305,7 +1372,10 @@ Examples:
         supervisorChat,
         listArchivedTasks,
         restoreArchivedTask,
-        deleteArchivedTask
+        deleteArchivedTask,
+        continueArchivedTask,
+        watchTask,
+        archiveTask
     };
 }
 
